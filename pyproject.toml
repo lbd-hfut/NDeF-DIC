@@ -64,6 +64,7 @@ Documentation = "https://github.com/lbd-hfut/NDeF-DIC"
 [project.optional-dependencies]
 # COLMAP integration (for reading .mat calibration files, running SfM)
 colmap = [
+  "pycolmap>=4.0",
   "scipy>=1.10.0",
 ]
 

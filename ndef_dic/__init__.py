@@ -1,13 +1,9 @@
 """
-NDeF-DIC: Neural Deformation Field for Multi-Camera Digital Image Correlation.
+NDF-DIC: Neural Deformation Field for Multi-View Digital Image Correlation.
 
-A unified 3D neural field framework that represents multi-camera DIC observations
-without stitching, using:
-  - Neural SDF for implicit surface representation
-  - Intensity field for speckle pattern on the surface
-  - 3D deformation field for displacement measurement
-  - Per-camera appearance embeddings for exposure compensation
-  - Differentiable surface rendering (no volumetric rendering needed)
+A framework for recovering continuous 3D displacement fields from
+multi-view speckle images, using neural implicit representations
+and projection-constrained photometric consistency (ZNSSD).
 """
 
 __version__ = "0.1.0"

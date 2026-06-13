@@ -1,0 +1,88 @@
+{
+  "speckle_quality": {
+    "mig_mean_of_means": 53.9955070983354,
+    "mig_std_of_means": 2.3119580820932737,
+    "mig_min": 51.32272194540247,
+    "mig_max": 57.48681316642153,
+    "mig_def_mean": 54.331608678023535,
+    "mig_stability": -0.3361015796881155,
+    "speckle_size_mean": 8.365733713293338,
+    "speckle_size_std": 0.3561850804334082,
+    "peak_sharpness_mean": 68.55271193086243
+  },
+  "coverage": {
+    "coverage_mean": 0.5486458333333333,
+    "coverage_std": 0.0014566693527266962,
+    "coverage_min": 0.5463162294238683,
+    "coverage_max": 0.551107896090535,
+    "intensity_mean_of_means": 80.9132813754541,
+    "intensity_mean_of_stds": 27.903725478810617,
+    "global_dynamic_range": 214.0
+  },
+  "multiview": {
+    "num_cameras": 12,
+    "camera_distance_mean": 380.0,
+    "cylinder_radius_mm": 80.0,
+    "adjacent_baselines": [
+      196.70247427791574,
+      196.7024742779158,
+      196.7024742779158,
+      196.7024742779157,
+      196.7024742779159,
+      196.7024742779157,
+      196.7024742779157,
+      196.7024742779157,
+      196.7024742779159,
+      196.70247427791585,
+      196.70247427791557,
+      196.70247427791597
+    ],
+    "baseline_mean": 196.70247427791574,
+    "baseline_std": 1.160311428702309e-13,
+    "baseline_min": 196.70247427791557,
+    "baseline_max": 760.0000000000001,
+    "triangulation_angle_mean": 29.021637398139706,
+    "triangulation_angle_std": 1.7852165294699933e-14,
+    "fov_horizontal_deg": 34.499137389528656,
+    "cylinder_angular_extent_deg": 24.30639493801574,
+    "angular_step_deg": 30.0,
+    "cylinder_overlap_angle_deg": -5.693605061984261,
+    "overlap_ratio": 0.0,
+    "overlap_arc_mm": 0.0
+  },
+  "deformation": {
+    "displacement": {
+      "u_mean": 2.578671592345927e-05,
+      "u_std": 0.35358136892318726,
+      "u_min": -0.5,
+      "u_max": 0.5,
+      "v_mean": 0.0,
+      "v_std": 0.0,
+      "v_min": 0.0,
+      "v_max": 0.0,
+      "w_mean": -8.359291678061709e-05,
+      "w_std": 0.3535253703594208,
+      "w_min": -0.5,
+      "w_max": 0.5,
+      "magnitude_mean": 0.5,
+      "magnitude_std": 2.75048137154954e-06,
+      "magnitude_max": 0.5000084042549133,
+      "magnitude_min": 0.49999162554740906
+    },
+    "cylindrical": {
+      "dr_mean": 0.5,
+      "dr_std": 1.7393859934600187e-06,
+      "dr_max": 0.5000152587890625,
+      "dtheta_deg_mean": 7.630798108948511e-07,
+      "dtheta_deg_max": 1.3660377589985728e-05,
+      "dy_mean": 0.0,
+      "dy_std": 0.0,
+      "dy_max": 0.0
+    },
+    "surface": {
+      "surface_area_mm2": 60318.57894892403,
+      "point_density_per_mm2": 248.67959858108648,
+      "avg_spacing_mm": 0.06341323676169618
+    }
+  }
+}

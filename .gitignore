@@ -220,3 +220,13 @@ __marimo__/
 CLAUDE.md
 .claude/
 docs/
+
+case/**/*.png
+case/**/*.mat
+case/**/calibration/
+case/**/output/
+case/**/colmap_input/
+case/**/dense/
+case/**/ground_truth/
+case/**/pinn_stereo_out/
+case/**/sparse/
