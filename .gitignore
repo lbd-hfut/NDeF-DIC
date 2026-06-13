@@ -219,7 +219,9 @@ __marimo__/
 
 CLAUDE.md
 .claude/
-docs/
+docs/superpowers/
+docs/neural-implicit-projection-zssd.md
+docs/new_plan.md
 
 case/**/*.png
 case/**/*.html
