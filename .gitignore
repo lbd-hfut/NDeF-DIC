@@ -233,3 +233,5 @@ case/**/dense/
 case/**/ground_truth/
 case/**/pinn_stereo_out/
 case/**/sparse/
+config/local.yaml
+checkpoints/
