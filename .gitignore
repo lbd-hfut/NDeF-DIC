@@ -222,6 +222,7 @@ CLAUDE.md
 docs/
 
 case/**/*.png
+case/**/*.html
 case/**/*.mat
 case/**/calibration/
 case/**/output/
