@@ -57,6 +57,8 @@ loss.backward() → 梯度经 project_to_camera 反传至 Φ 网络
 
 ### 三阶段流水线
 
+![NDeF-DIC Pipeline](docs/flowchart_pipeline.png)
+
 ```
 Step 1: Geometric Reconstruction（几何重建）
         COLMAP SfM → K,R,t + 稀疏点
@@ -80,6 +82,8 @@ Step 3: Neural Deformation Field（变形场训练）
 - **PatchMatch**（推荐）：COLMAP 的标准稠密重建，精度高，需要 CUDA
 - **PINN-Stereo**（实验性）：每相机一个隐式深度网络 D_c(u,v)，通过跨相机 ZNSSD 联合优化。精度不如 PatchMatch，但**完全可微**
 
+![PINN-Stereo DepthNetwork](docs/network_pinn_stereo.png)
+
 ### Step 2 设计决策
 
 Step 2 的价值不在产生数据——而在**统一接口**。两种实现对 Step 3 完全透明：
@@ -94,6 +98,12 @@ Step 3 不关心底层是哪种实现——`project_to_camera()` 的行为完全
 ### Step 3 设计决策
 
 **网络架构**：
+
+![DeformationNetwork Φ(x,t)](docs/network_deformation_net.png)
+
+**HashGridEncoder 细节**：
+
+![HashGridEncoder](docs/network_hash_grid.png)
 
 ```
   x ∈ [-1,1]³                     t ∈ [0,1]
