@@ -20,9 +20,13 @@ Step 1 sparse can be skipped via config (step1.sparse_mode: skip_sfm).
 
 import os
 import sys
+import json
 import argparse
 import time
+import numpy as np
 from typing import Dict, Any
+
+import torch
 
 
 def parse_args():
@@ -133,6 +137,8 @@ def run_step3(
     net = DeformationNetwork(
         hash_grid_config=to_hash_grid_config(cfg),
         temporal_config=to_temporal_config(cfg),
+        spatial_encoding=c.get("spatial_encoding", "hash_grid"),
+        pe_n_freqs=c.get("pe_n_freqs", 10),
         hidden_dim=d.get("hidden_dim", 256),
         alpha=d.get("alpha", 5.0),
         learnable_alpha=d.get("learnable_alpha", False),
@@ -151,6 +157,53 @@ def run_step3(
     chk_path = os.path.join(chk_dir, "model_final.pt")
     trainer.save_checkpoint(chk_path)
 
+    # ---- Evaluate and save displacement field ----
+    results_dir = os.path.join(data["data_dir"], "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    ref_points = _get_surface_points(surface)
+    n_pts = ref_points.shape[0]
+    n_steps = dataset.n_steps
+    chunk_size = 20000  # process in chunks to avoid OOM
+
+    # Save reference (undeformed) surface points
+    np.save(os.path.join(results_dir, "ref_points.npy"), ref_points.cpu().numpy())
+    print(f"[Step 3] Reference points saved: {n_pts} points → results/ref_points.npy")
+
+    for step in range(1, n_steps + 1):
+        t_val = float(step) / n_steps
+        disp_chunks = []
+        def_chunks = []
+
+        for start in range(0, n_pts, chunk_size):
+            end = min(start + chunk_size, n_pts)
+            pts_chunk = ref_points[start:end]
+
+            phi = trainer.query_displacement(pts_chunk, t_val)  # (chunk, 3) world units
+            disp_chunks.append(phi.cpu().numpy())
+            def_chunks.append((pts_chunk + phi).cpu().numpy())
+
+        disp = np.concatenate(disp_chunks, axis=0)  # (N, 3)
+        x_def = np.concatenate(def_chunks, axis=0)  # (N, 3)
+
+        np.save(os.path.join(results_dir, f"disp_step{step:03d}.npy"), disp)
+        np.save(os.path.join(results_dir, f"def_points_step{step:03d}.npy"), x_def)
+
+        mag = np.linalg.norm(disp, axis=1)
+        print(f"[Step 3] Step {step}/{n_steps}: t={t_val:.3f} | "
+              f"disp mag: mean={mag.mean():.4f}, max={mag.max():.4f} → "
+              f"results/disp_step{step:03d}.npy")
+
+    # Save metadata
+    meta = {
+        "n_points": int(n_pts),
+        "n_steps": int(n_steps),
+        "data_dir": data["data_dir"],
+        "checkpoint": chk_path,
+    }
+    with open(os.path.join(results_dir, "results_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+
     # Quick summary
     n_params = sum(p.numel() for p in net.parameters())
     final_losses = trainer.loss_history[-5:] if trainer.loss_history else []
@@ -163,7 +216,28 @@ def run_step3(
         "n_params": n_params,
         "final_znssd": avg_final,
         "checkpoint": chk_path,
+        "results_dir": results_dir,
+        "n_points": n_pts,
+        "n_steps": n_steps,
     }
+
+
+def _get_surface_points(surface) -> torch.Tensor:
+    """Extract reference surface points from the SurfaceProvider.
+
+    For PointCloudSurface, returns the full stored point cloud.
+    For NeuralStereoSurface, samples a dense set of points.
+    """
+    from ndef_dic.surface_provider import PointCloudSurface
+
+    if isinstance(surface, PointCloudSurface):
+        # Access the full point cloud directly
+        return surface._points
+    else:
+        # NeuralStereoSurface: sample a dense set via pixel grid
+        print("[Step 3] NeuralStereoSurface: sampling 100K points for output...")
+        pts, _ = surface.sample_surface_points(100_000, strategy="uniform")
+        return pts
 
 
 def main():
@@ -231,6 +305,8 @@ def main():
         print(f"  Network params: {s3_result['n_params']:,}")
         print(f"  Final ZNSSD: {s3_result['final_znssd']:.2f}")
         print(f"  Checkpoint: {s3_result['checkpoint']}")
+        print(f"  Results: {s3_result['results_dir']}/ "
+              f"({s3_result['n_points']} pts × {s3_result['n_steps']} steps)")
 
     # ---- Done ----
     elapsed = time.time() - total_start

@@ -25,7 +25,7 @@ def extract_patches(
     patch_size: int,                  # side length (odd recommended)
     H: int,                           # image height
     W: int,                           # image width
-    sub_batch_size: int = 128,
+    sub_batch_size: int = 512,
 ) -> torch.Tensor:
     """Extract square patches centered at pixel coordinates.
 
@@ -132,16 +132,21 @@ def deformation_smoothness_loss(
     deformation_net: nn.Module,  # DeformationNetwork Φ(x, t)
     x: torch.Tensor,             # (N, 3) surface points
     t: torch.Tensor,             # (N, 1) time
+    n_projections: int = 1,      # random projections (unbiased estimator, SGD averages)
 ) -> torch.Tensor:
     """||∇_x Φ(x,t)||_F^2 — penalize high-frequency spatial variation.
 
-    Computes the full 3×3 Jacobian of Φ w.r.t. x via autograd,
-    then returns the mean squared Frobenius norm.
+    Uses random projection trick:
+      E_v[||J^T v||²] = ||J||²_F  for v ~ N(0, I)
+
+    This requires only ONE autograd.grad call (vs 3 for exact Jacobian),
+    giving ~3× speedup while remaining an unbiased estimator.
 
     Args:
         deformation_net: DeformationNetwork instance.
         x:               (N, 3) surface points (will set requires_grad).
         t:               (N, 1) time values.
+        n_projections:   Number of random projections to average (default 2).
 
     Returns:
         scalar smoothness loss.
@@ -149,23 +154,22 @@ def deformation_smoothness_loss(
     x.requires_grad_(True)
     phi = deformation_net(x, t)  # (N, 3)
 
-    grad_u = torch.autograd.grad(
-        outputs=phi[:, 0].sum(), inputs=x,
-        create_graph=True, retain_graph=True,
-    )[0]  # (N, 3)
-    grad_v = torch.autograd.grad(
-        outputs=phi[:, 1].sum(), inputs=x,
-        create_graph=True, retain_graph=True,
-    )[0]  # (N, 3)
-    grad_w = torch.autograd.grad(
-        outputs=phi[:, 2].sum(), inputs=x,
-        create_graph=True, retain_graph=True,
-    )[0]  # (N, 3)
+    total_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-    # ||∇Φ||_F² = Σ_{i∈{u,v,w}} Σ_{j∈{x,y,z}} (∂Φ_i/∂x_j)²
-    loss = (
-        (grad_u ** 2).sum(dim=-1).mean() +
-        (grad_v ** 2).sum(dim=-1).mean() +
-        (grad_w ** 2).sum(dim=-1).mean()
-    )
-    return loss
+    for _ in range(n_projections):
+        # Random direction per point: v ~ N(0, I_3)
+        v = torch.randn_like(phi)  # (N, 3)
+
+        # Scalar: Σ_i φ_i · v_i (single scalar covers all points & components)
+        s = (phi * v).sum()
+
+        # Single backward pass computes all J_i^T v_i simultaneously
+        g = torch.autograd.grad(
+            outputs=s, inputs=x,
+            create_graph=True, retain_graph=True,
+        )[0]  # (N, 3)
+
+        # E[||g_i||²] = ||J_i||²_F
+        total_loss = total_loss + (g ** 2).sum(dim=-1).mean()
+
+    return total_loss / n_projections

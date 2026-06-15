@@ -225,18 +225,13 @@ class DeformationFieldTrainer:
         patch_size: int, lambda_smooth: float,
         M: int, K: int,
     ) -> Dict:
-        """Single training iteration.
+        """Single training iteration — GPU-optimized.
 
-        Args:
-            t_val:  Normalized time [0, 1] for network input.
-            t_step: Integer load step for deformed image lookup (1-indexed).
-
-        This is the core algorithm from docs/step2-step3-interface.md §3:
-          1. Sample surface points from SurfaceProvider
-          2. Get visible cameras
-          3. Compute Φ(x,t) → x_def = x + φ
-          4. Per-camera: project → extract patches → ZNSSD
-          5. Total loss: L_dic + λ * L_smooth
+        Key optimizations vs naive implementation:
+          1. Batch projection: all cameras in ONE matmul (not N separate ones)
+          2. Zero .item() calls inside per-camera loop (keeps GPU pipeline full)
+          3. Active camera pre-filter: only iterate cameras with ≥5 visible pts
+          4. valid_count stays on GPU as tensor until final division
         """
         # ---- 1. Sample surface points ----
         x, normals = self.surface.sample_surface_points(M, strategy="uniform")
@@ -249,36 +244,45 @@ class DeformationFieldTrainer:
 
         # ---- 3. Compute deformation ----
         t_tensor = torch.full((M, 1), t_val, device=self.device, dtype=torch.float32)
-        phi = self.deformation_net(x_norm, t_tensor)  # (M, 3) in normalized space
+        phi = self.deformation_net(x_norm, t_tensor)
         x_def_norm = x_norm + phi
         x_def = unnormalize_points(x_def_norm, self.surface.bbox)
 
-        # ---- 4. Per-camera ZNSSD ----
+        # ---- 4. Per-camera ZNSSD (GPU-optimized) ----
+        n_cams = self.surface.num_cameras
+        W, H = self.dataset.W, self.dataset.H
+
+        # 4a. Batch project ALL cameras at once — 1 big matmul instead of N small ones
+        uv_all_ref = self.surface.batch_project_all_cameras(x)      # (M, n_cams, 2)
+        uv_all_def = self.surface.batch_project_all_cameras(x_def)  # (M, n_cams, 2)
+
+        # 4b. Pre-filter: which cameras have ≥5 visible points? (1 sync, not N)
+        cam_counts = torch.zeros(n_cams, dtype=torch.int32, device=self.device)
+        valid_cam_mask = cam_ids >= 0
+        cam_flat = cam_ids[valid_cam_mask]
+        cam_counts.scatter_add_(0, cam_flat, torch.ones_like(cam_flat, dtype=torch.int32))
+        active_cams = torch.where(cam_counts >= 5)[0].tolist()  # single GPU→CPU
+
+        # 4c. Loop only over active cameras — no .item() calls inside
         total_znssd = torch.tensor(0.0, device=self.device)
-        valid_count = 0
+        valid_count = torch.tensor(0.0, device=self.device)  # stay on GPU
 
-        for cam_id in range(self.surface.num_cameras):
-            cam_mask = (cam_ids == cam_id).any(dim=-1)  # (M,)
-            n_vis = cam_mask.sum().item()
-            if n_vis < 5:
-                continue
+        for cam_id in active_cams:
+            # Points assigned to this camera
+            cam_mask = (cam_ids == cam_id).any(dim=-1)  # (M,) bool
 
-            x_c = x[cam_mask]
-            x_def_c = x_def[cam_mask]
+            # Get pre-computed projections for this camera
+            uv_ref = uv_all_ref[cam_mask, cam_id]  # (n_vis, 2)
+            uv_def = uv_all_def[cam_mask, cam_id]  # (n_vis, 2)
 
-            # Project reference and deformed points
-            uv_ref = self.surface.project_to_camera(x_c, cam_id)
-            uv_def = self.surface.project_to_camera(x_def_c, cam_id)
-
-            # Filter out-of-bounds
-            W, H = self.dataset.W, self.dataset.H
+            # In-bounds filter
             in_bounds = (
                 (uv_ref[:, 0] >= 0) & (uv_ref[:, 0] < W) &
                 (uv_ref[:, 1] >= 0) & (uv_ref[:, 1] < H) &
                 (uv_def[:, 0] >= 0) & (uv_def[:, 0] < W) &
                 (uv_def[:, 1] >= 0) & (uv_def[:, 1] < H)
             )
-            if in_bounds.sum() < 5:
+            if in_bounds.sum() < 5:  # single unavoidable sync per cam
                 continue
 
             # Extract patches
@@ -291,12 +295,13 @@ class DeformationFieldTrainer:
                 uv_def[in_bounds], patch_size,
             )
 
-            # ZNSSD
+            # ZNSSD — all GPU tensors, no sync
             pair_loss = znssd(P_ref, P_def)
             total_znssd = total_znssd + pair_loss * in_bounds.sum()
-            valid_count += in_bounds.sum().item()
+            valid_count = valid_count + in_bounds.sum()
 
-        L_dic = total_znssd / max(valid_count, 1)
+        # GPU-native division (no sync needed)
+        L_dic = total_znssd / valid_count.clamp(min=1)
 
         # ---- 5. Smoothness regularization ----
         L_smooth = deformation_smoothness_loss(
@@ -317,7 +322,7 @@ class DeformationFieldTrainer:
             "L_dic": L_dic.item(),
             "L_smooth": L_smooth.item(),
             "L_total": L_total.item(),
-            "valid_pairs": valid_count,
+            "valid_pairs": int(valid_count.item()),
             "grad_norm": float(grad_norm) if grad_norm is not None else 0.0,
         }
 
@@ -329,7 +334,7 @@ class DeformationFieldTrainer:
     def _evaluate(
         self, t_val: float, t_step: int, patch_size: int, M: int, K: int
     ) -> float:
-        """Compute ZNSSD on a held-out set of surface points."""
+        """Compute ZNSSD on a held-out set of surface points — GPU-optimized."""
         self.deformation_net.eval()
 
         x, normals = self.surface.sample_surface_points(M, strategy="uniform")
@@ -340,17 +345,26 @@ class DeformationFieldTrainer:
         phi = self.deformation_net(x_norm, t_tensor)
         x_def = unnormalize_points(x_norm + phi, self.surface.bbox)
 
-        total_znssd = torch.tensor(0.0, device=self.device)
-        valid_count = 0
+        # Batch project all cameras at once
+        n_cams = self.surface.num_cameras
         W, H = self.dataset.W, self.dataset.H
+        uv_all_ref = self.surface.batch_project_all_cameras(x)
+        uv_all_def = self.surface.batch_project_all_cameras(x_def)
 
-        for cam_id in range(self.surface.num_cameras):
+        # Pre-filter active cameras
+        cam_counts = torch.zeros(n_cams, dtype=torch.int32, device=self.device)
+        valid_cam_mask = cam_ids >= 0
+        cam_flat = cam_ids[valid_cam_mask]
+        cam_counts.scatter_add_(0, cam_flat, torch.ones_like(cam_flat, dtype=torch.int32))
+        active_cams = torch.where(cam_counts >= 5)[0].tolist()
+
+        total_znssd = torch.tensor(0.0, device=self.device)
+        valid_count = torch.tensor(0.0, device=self.device)
+
+        for cam_id in active_cams:
             cam_mask = (cam_ids == cam_id).any(dim=-1)
-            if cam_mask.sum() < 5:
-                continue
-
-            uv_ref = self.surface.project_to_camera(x[cam_mask], cam_id)
-            uv_def = self.surface.project_to_camera(x_def[cam_mask], cam_id)
+            uv_ref = uv_all_ref[cam_mask, cam_id]
+            uv_def = uv_all_def[cam_mask, cam_id]
 
             in_bounds = (
                 (uv_ref[:, 0] >= 0) & (uv_ref[:, 0] < W) &
@@ -368,11 +382,11 @@ class DeformationFieldTrainer:
                 self._def_images_gpu[t_step][cam_id], uv_def[in_bounds], patch_size,
             )
 
-            total_znssd += znssd(P_ref, P_def) * in_bounds.sum()
-            valid_count += in_bounds.sum().item()
+            total_znssd = total_znssd + znssd(P_ref, P_def) * in_bounds.sum()
+            valid_count = valid_count + in_bounds.sum()
 
         self.deformation_net.train()
-        return (total_znssd / max(valid_count, 1)).item()
+        return (total_znssd / valid_count.clamp(min=1)).item()
 
     # =================================================================
     # Checkpointing

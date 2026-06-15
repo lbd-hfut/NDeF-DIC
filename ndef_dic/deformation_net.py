@@ -301,9 +301,10 @@ class DeformationNetwork(nn.Module):
     """Neural Deformation Field Φ(x, t): ℝ⁴ → ℝ³.
 
     Architecture:
-      Spatial:  HashGridEncoder(L=16, F=2) → 32 dims
+      Spatial:  HashGridEncoder(L=16, F=2) → 32 dims  OR
+                PositionalEncoding(L=10) → 63 dims (dense, GPU-friendly)
       Temporal: TemporalEncoder(strategy)   → 1 or 12 dims
-      Concat:   32 + time_dims = input_dim
+      Concat:   spatial_dim + time_dims = input_dim
       MLP:      input_dim → 256 → 256 → (skip+input_dim) → 256 → 256 → 256 → 3
       Gate:     Φ = tanh(α·t) · Φ_raw
 
@@ -311,8 +312,10 @@ class DeformationNetwork(nn.Module):
     since tanh(α·0) = 0.
 
     Args:
-        hash_grid_config: kwargs for HashGridEncoder.
+        hash_grid_config: kwargs for HashGridEncoder (ignored if spatial_encoding='frequency').
         temporal_config:  kwargs for TemporalEncoder.
+        spatial_encoding: "hash_grid" | "frequency" — dense PE avoids GPU hash lookup overhead.
+        pe_n_freqs:       Frequency bands for positional encoding (default 10).
         hidden_dim:       MLP hidden dimension (256).
         alpha:            Steepness of tanh gate (5.0).
         learnable_alpha:  If True, alpha is a learnable parameter.
@@ -322,19 +325,30 @@ class DeformationNetwork(nn.Module):
         self,
         hash_grid_config: Optional[dict] = None,
         temporal_config: Optional[dict] = None,
+        spatial_encoding: str = "hash_grid",
+        pe_n_freqs: int = 10,
         hidden_dim: int = 256,
         alpha: float = 5.0,
         learnable_alpha: bool = False,
     ):
         super().__init__()
 
+        self.spatial_encoding = spatial_encoding
+
         # Encoders
-        self.hash_encoder = HashGridEncoder(**(hash_grid_config or {}))
+        if spatial_encoding == "frequency":
+            self.hash_encoder = PositionalEncoding(
+                n_freqs=pe_n_freqs, include_input=True,
+                log_sampling=True, input_dim=3,
+            )  # 3 + 2*3*10 = 63 dims, all dense ops
+        else:
+            self.hash_encoder = HashGridEncoder(**(hash_grid_config or {}))
+
         self.temporal_encoder = TemporalEncoder(**(temporal_config or {}))
 
-        spatial_dim = self.hash_encoder.output_dim   # 32
+        spatial_dim = self.hash_encoder.output_dim   # 32 (hash) or 63 (PE)
         temporal_dim = self.temporal_encoder.output_dim  # 1 or 12
-        input_dim = spatial_dim + temporal_dim         # 33 or 44
+        input_dim = spatial_dim + temporal_dim
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
