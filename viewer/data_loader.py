@@ -47,6 +47,11 @@ class LoadedData:
     n_steps: int = 0
     results_meta: Optional[Dict] = None
 
+    # ---- Ground truth (optional) ----
+    gt_ref_points: Optional[np.ndarray] = None      # (N_gt, 3)
+    gt_disp_fields: Optional[Dict[int, np.ndarray]] = None  # {step: (N_gt, 3)}
+    gt_n_steps: int = 0
+
     # ---- Images ----
     cam_names: Optional[List[str]] = None
     ref_image_paths: Optional[List[str]] = None
@@ -88,7 +93,10 @@ class DataLoader:
         # 4. Displacement results
         self._load_displacement(data)
 
-        # 5. Images
+        # 5. Ground truth (optional)
+        self._load_ground_truth(data)
+
+        # 6. Images
         self._load_images(data)
 
         return data
@@ -254,6 +262,51 @@ class DataLoader:
                     data.results_meta = json.load(f)
             except Exception as e:
                 self._errors.append(f"Failed to load results_meta: {e}")
+
+    def _load_ground_truth(self, data: LoadedData):
+        """Load ground truth displacement data if available.
+
+        Looks for:
+          ground_truth/points_ref.npy          — reference points
+          ground_truth/displacement_step*.npy  — displacement per step
+        """
+        gt_dir = os.path.join(data.data_dir, "ground_truth")
+        if not os.path.isdir(gt_dir):
+            return
+
+        # Reference points
+        ref_path = os.path.join(gt_dir, "points_ref.npy")
+        if not os.path.exists(ref_path):
+            return
+
+        try:
+            data.gt_ref_points = np.load(ref_path).astype(np.float32)
+            print(f"[DataLoader] Loaded GT ref_points: {data.gt_ref_points.shape}")
+        except Exception as e:
+            self._errors.append(f"Failed to load GT ref_points: {e}")
+            return
+
+        # Discover displacement steps
+        disp_files = sorted(glob.glob(os.path.join(gt_dir, "displacement_step*.npy")))
+        if not disp_files:
+            return
+
+        data.gt_disp_fields = {}
+        for f in disp_files:
+            basename = os.path.basename(f)
+            step_str = basename.replace("displacement_step", "").replace(".npy", "")
+            try:
+                step = int(step_str)
+            except ValueError:
+                continue
+
+            try:
+                data.gt_disp_fields[step] = np.load(f).astype(np.float32)
+            except Exception as e:
+                self._errors.append(f"Failed to load GT {basename}: {e}")
+
+        data.gt_n_steps = len(data.gt_disp_fields)
+        print(f"[DataLoader] Loaded {data.gt_n_steps} GT displacement steps")
 
     def _load_images(self, data: LoadedData):
         """Discover camera directories and image paths."""

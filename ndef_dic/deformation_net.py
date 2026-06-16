@@ -370,9 +370,9 @@ class DeformationNetwork(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize MLP weights (small), output layer near-zero."""
+        """Initialize MLP weights — Xavier for tanh, output layer near-zero."""
         for layer in [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4]:
-            nn.init.kaiming_uniform_(layer.weight, a=0.0, nonlinearity="relu")
+            nn.init.xavier_uniform_(layer.weight)
             nn.init.zeros_(layer.bias)
 
         # Output layer: near-zero → Φ ≈ 0 at initialization
@@ -403,12 +403,12 @@ class DeformationNetwork(nn.Module):
         feat_time = self.temporal_encoder(t)      # (N, T)
         feat = torch.cat([feat_space, feat_time], dim=-1)  # (N, input_dim)
 
-        # MLP with skip at layer 2
-        h = F.relu(self.lin0(feat))
-        h = F.relu(self.lin1(h))
-        h = F.relu(self.lin2(torch.cat([h, feat], dim=-1)))
-        h = F.relu(self.lin3(h))
-        h = F.relu(self.lin4(h))
+        # MLP with skip at layer 2 (tanh activation for smooth deformation)
+        h = torch.tanh(self.lin0(feat))
+        h = torch.tanh(self.lin1(h))
+        h = torch.tanh(self.lin2(torch.cat([h, feat], dim=-1)))
+        h = torch.tanh(self.lin3(h))
+        h = torch.tanh(self.lin4(h))
         phi_raw = self.lin5(h)  # (N, 3)
 
         # Tanh gate: hard constraint Φ=0 at t=0

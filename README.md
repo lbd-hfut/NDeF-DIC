@@ -229,7 +229,6 @@ step3:
         iterations: 500
         lr: 0.0001
 
-# GPU 最优配置: python run.py --config config/gpu.yaml
 ```
 
 ### 运行
@@ -238,8 +237,8 @@ step3:
 # CPU 最优配置（推荐，~1.2 min 训练）
 python run.py
 
-# GPU 最优配置（~4.9 min 训练）
-python run.py --config config/gpu.yaml
+# GPU 配置（~4.9 min 训练）
+python run.py --device cuda
 
 # 只跑 Step 3（已有标定和稠密点云）
 python run.py --steps 3
@@ -255,9 +254,8 @@ python run.py --help
 
 | 文件 | 用途 |
 |------|------|
-| `config/default.yaml` | 默认配置（参考，勿直接修改） |
-| `config/local.yaml` | **CPU 最优**（推荐），已 gitignore |
-| `config/gpu.yaml` | **GPU 最优**，PE 编码 + batch proj |
+| `config/default.yaml` | 完整参考配置（勿直接修改） |
+| `config/local.yaml` | 用户本地配置（已 gitignore，通过 CLI 覆盖设备等） |
 
 ### 3D Viewer
 

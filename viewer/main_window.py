@@ -185,7 +185,10 @@ class MainWindow(QMainWindow):
         )
 
         # Displacement view
-        self.disp_view.set_data(data.ref_points, data.disp_fields, data.def_points)
+        self.disp_view.set_data(
+            data.ref_points, data.disp_fields, data.def_points,
+            data.gt_ref_points, data.gt_disp_fields,
+        )
 
         # Image viewer
         self.image_viewer.set_data(
@@ -227,6 +230,11 @@ class MainWindow(QMainWindow):
             parts.append(f"{len(data.ref_points):,} ref pts")
             if data.n_steps > 0:
                 parts.append(f"{data.n_steps} disp steps")
+
+        if data.gt_ref_points is not None:
+            parts.append(f"{len(data.gt_ref_points):,} GT pts")
+            if data.gt_n_steps > 0:
+                parts.append(f"{data.gt_n_steps} GT steps")
 
         if data.cam_names is not None:
             parts.append(f"{len(data.cam_names)} image sets")

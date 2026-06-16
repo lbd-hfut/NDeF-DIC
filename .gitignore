@@ -228,6 +228,7 @@ case/**/*.html
 case/**/*.mat
 case/**/calibration/
 case/**/output/
+case/**/results/
 case/**/colmap_input/
 case/**/dense/
 case/**/ground_truth/

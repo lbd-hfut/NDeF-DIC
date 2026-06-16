@@ -40,7 +40,7 @@ class Sparse3DView(QWidget):
             xlabel='X (mm)', ylabel='Y (mm)', zlabel='Z (mm)',
             line_width=1, color='white',
         )
-        self.plotter.show_grid(color='gray', all_edges=True, opacity=0.15)
+        self.plotter.show_grid(color='gray', all_edges=True)
         self._show_placeholder("No data loaded. Use Load button to load a data directory.")
 
     # =================================================================
@@ -91,7 +91,7 @@ class Sparse3DView(QWidget):
             xlabel='X (mm)', ylabel='Y (mm)', zlabel='Z (mm)',
             line_width=1, color='white',
         )
-        self.plotter.show_grid(color='gray', all_edges=True, opacity=0.15)
+        self.plotter.show_grid(color='gray', all_edges=True)
         self._camera_actors = []
 
     def reset_camera(self) -> None:
