@@ -1,5 +1,5 @@
 # =============================================================================
-# NDF-DIC requirements
+# NDeF-DIC requirements
 # =============================================================================
 #
 # Install: pip install -r requirements.txt
@@ -10,15 +10,28 @@ torch>=2.0.0
 numpy>=1.24.0
 scipy>=1.10.0
 opencv-python>=4.8.0
+imageio>=2.31.0
+matplotlib>=3.7.0
 pyyaml>=6.0
+tqdm>=4.65.0
+tensorboard>=2.13.0
 
-# Step 1: COLMAP integration (optional)
+# SfM / COLMAP integration (optional)
 # -----------------------------------------------------------------------------
-# pycolmap requires a COLMAP installation with CUDA support.
-# Uncomment if you need PatchMatch Stereo dense reconstruction.
-# pycolmap
+# pycolmap is required for running the SfM stage through Python.
+# Install manually if your platform has a compatible COLMAP/PyCOLMAP build:
+# pycolmap>=0.6.0
 
 # Development (optional)
 # -----------------------------------------------------------------------------
-# pytest
-# matplotlib
+# pytest>=7.0
+# pytest-cov>=4.0
+# ruff>=0.1.0
+# mypy>=1.0
+# black>=23.0
+
+# Visualization extras (optional)
+# -----------------------------------------------------------------------------
+# open3d>=0.17.0
+# plotly>=5.14.0
+# pyvista>=0.42.0

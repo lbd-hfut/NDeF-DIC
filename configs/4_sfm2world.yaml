@@ -1,0 +1,64 @@
+# 4_sfm2world.yaml
+# Purpose:
+#   Estimate the physical scale factor that maps arbitrary SfM coordinates to
+#   real-world units using a calibration chessboard.
+#
+# Method:
+#   1. Detect chessboard inner corners in every camera that sees the board.
+#   2. Select two visible cameras.
+#   3. Triangulate corresponding chessboard corners using SfM camera poses.
+#   4. Measure average adjacent grid-edge length in SfM units.
+#   5. Compute sfm_to_world_scale = physical_square_size / sfm_square_size.
+
+sfm2world:
+  # Scale-estimation method.
+  # Options:
+  #   chessboard: use known chessboard square size.
+  method: chessboard
+
+  # Directory containing calibration-board images.
+  # Expected structure:
+  #   case/CylinderDIC/calibrate_images/cam_0/<single image>
+  #   case/CylinderDIC/calibrate_images/cam_1/<single image>
+  # Each camera folder should contain only one board image, so no per-image
+  # filename selector is needed.
+  # This should match project.calibrate_image_dir and is relative to
+  # project.data_dir, not project.result_dir.
+  image_dir: calibrate_images
+
+  # Number of inner chessboard corners along board width.
+  # For a 10-square-wide board this is 9.
+  inner_cols: 9
+
+  # Number of inner chessboard corners along board height.
+  # For an 8-square-high board this is 7.
+  inner_rows: 7
+
+  # Physical size of one chessboard square in project.units.world_length.
+  square_size: 10.0
+
+  # Camera-pair selection among cameras that detect the full chessboard.
+  # Options:
+  #   middle: choose the two central cameras in the visible arc. This follows
+  #           the current research design.
+  #   max_baseline: choose the visible pair with largest SfM baseline. Often
+  #                 better for triangulation stability, but may use more
+  #                 oblique views.
+  pair_selection: middle
+
+  # Corner subpixel refinement window. Larger can help blurred images but may
+  # drift if corners are close or strongly distorted.
+  subpix_window: 11
+
+  # Minimum common corners required after detection/filtering.
+  min_common_corners: 12
+
+  # Reprojection-error threshold used to filter bad triangulated corners.
+  max_reprojection_error_px: 3.0
+
+  # Save per-camera corner detection overlays for visual QA.
+  save_overlays: true
+
+  # Output directory for sfm2world_scale.json and triangulation NPZ.
+  # Relative to project.result_dir.
+  output_dir: sfm2world

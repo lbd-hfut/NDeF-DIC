@@ -1,0 +1,91 @@
+# 1_project.yaml
+# Purpose:
+#   Define the shared experiment identity, directory layout, camera count, and
+#   image-sequence convention used by all NDeF-DIC modules.
+#
+# Image sequence convention:
+#   - Each camera has one folder, e.g. case/CylinderDIC/images/cam_0/.
+#   - The first image in natural filename order is the reference image.
+#   - The following images are deformation/current images.
+#   - If dense.auto_roi.enabled = true, the last image is still treated as a
+#     deformation/current image.
+#   - If dense.auto_roi.enabled = false, the last image is treated as a mask
+#     image and must not be used as a deformation/current image.
+
+project:
+  # Human-readable case name used in logs and output summaries.
+  name: CylinderDIC
+
+  # Root directory of this experimental case.
+  data_dir: case/CylinderDIC
+
+  # Root output directory relative to project.data_dir.
+  # Module result paths in other config files are relative to this folder
+  # unless explicitly stated otherwise.
+  result_dir: result
+
+  # Multi-camera image folder under data_dir.
+  image_dir: images
+
+  # Multi-camera calibration-board image folder under data_dir.
+  # This is consumed by 4_sfm2world.yaml as sfm2world.image_dir.
+  calibrate_image_dir: calibrate_images
+
+  # Camera folder naming pattern. Current data uses cam_0, cam_1, ...
+  camera_name_pattern: cam_{id}
+
+  # Number of cameras expected in the dataset.
+  num_cameras: 12
+
+  image_sequence:
+    # Sorting rule for images inside each camera folder.
+    # Options:
+    #   natural: cam images are sorted by human/numeric order, e.g. 001, 002, 010.
+    #   lexicographic: plain string sorting.
+    sort_mode: natural
+
+    # Reference image selection.
+    # Options:
+    #   first: use the first sorted image as the reference image.
+    reference_selector: first
+
+    # Current/deformation image selection.
+    # Options:
+    #   all_after_reference: use all images after the first, subject to mask rule.
+    current_selector: all_after_reference
+
+    # Dense ROI controls the meaning of the final image when mask images are
+    # manually provided.
+    # Options:
+    #   dense_auto_roi_enabled: if dense.auto_roi.enabled=false, exclude last image as mask.
+    #   always_deformation: never treat the last image as mask.
+    #   always_mask: always treat the last image as mask.
+    last_image_role_rule: dense_auto_roi_enabled
+
+  units:
+    # SfM reconstruction scale is arbitrary before sfm2world.
+    sfm_length: arbitrary
+
+    # Physical world unit after sfm2world scale correction.
+    world_length: mm
+
+    # Deformation training is currently performed in SfM coordinates.
+    deformation_training_output: sfm
+
+    # Deformation exported result should be physical/world scale when
+    # scale.apply_to_deformation_export=true.
+    deformation_export_output: world
+
+scale:
+  # Coordinate frame used by SfM/dense/deformation before physical scaling.
+  # Options:
+  #   sfm_world: origin is sparse point centroid, axes aligned with cam_0.
+  coordinate_system: sfm_world
+
+  # Whether final deformation NPZ and 3D visualization should be multiplied by
+  # sfm2world.scale.sfm_to_world_scale.
+  apply_to_deformation_export: true
+
+  # Default location of the scale JSON produced by module 4_sfm2world.
+  # Relative to project.result_dir.
+  sfm2world_scale_json: sfm2world/sfm2world_scale.json

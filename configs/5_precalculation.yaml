@@ -1,0 +1,62 @@
+# 5_precalculation.yaml
+# Purpose:
+#   Configure sparse pre-calculation before neural deformation training.
+#   The current role is to estimate displacement magnitude scale only; it is
+#   not used as sparse displacement supervision or network initialization.
+#
+# Current method:
+#   Sparse patch DIC on selected ROI pixels -> multi-view triangulation
+#   -> robust displacement scale statistics.
+
+precalculation:
+  # Whether to run a pre-calculation module before deformation training.
+  enabled: true
+
+  # Method options:
+  #   patch_dic_sparse: sparse traditional patch-DIC correspondence and
+  #                     triangulation.
+  # Future options may include marker-based scale, manual scale, or optical
+  # flow based pre-calculation.
+  method: patch_dic_sparse
+
+  # Whether deformation training should use this result as output displacement
+  # scale. This only sets the network output magnitude scale.
+  use_as_displacement_scale: true
+
+  # Keep false unless we intentionally introduce sparse displacement
+  # supervision into the neural deformation loss.
+  use_as_sparse_initialization: false
+
+  patch_dic_sparse:
+    # Number of integer-pixel seed points sampled per camera ROI.
+    # Increase for more stable scale statistics; decrease for speed.
+    points_per_camera: 300
+
+    # Patch radius for DIC matching.
+    # radius=10 means 21x21 patches.
+    patch_radius: 10
+
+    # Search radius for cross-camera reference matching.
+    cross_search_radius: 40
+
+    # Search radius for temporal reference-current matching.
+    temporal_search_radius: 8
+
+    # Normalized cross-correlation threshold for cross-camera matching.
+    ncc_threshold_cross: 0.45
+
+    # Normalized cross-correlation threshold for temporal matching.
+    ncc_threshold_temporal: 0.55
+
+    # Torch matching batch size. Increase if GPU memory allows.
+    match_batch_size: 64
+
+    # Robust scale statistic consumed by deformation.displacement_scale.stat.
+    # Options:
+    #   mean: good when robust filtering has removed outliers.
+    #   median: more robust but can underrepresent smooth global displacement.
+    #   p75, p90: conservative upper-scale choices.
+    scale_stat: mean
+
+    # Relative to project.result_dir.
+    output_dir: deformation/precalculation/patch_dic_sparse

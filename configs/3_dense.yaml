@@ -1,0 +1,70 @@
+# 3_dense.yaml
+# Purpose:
+#   Configure dense reference-surface reconstruction from SfM cameras/images.
+#   Dense output provides the reference surface dataset consumed by deformation.
+#
+# Current dense chain:
+#   auto_roi -> model_init -> reconstruction_dataset -> znssd_opt
+#   -> reconstruction_dense -> surface_sampler
+
+dense:
+  # Dense module output directory, relative to project.result_dir.
+  output_dir: dense
+
+  auto_roi:
+    # Whether to infer ROI masks automatically from SfM features, triangulation
+    # structure, and speckle-like image texture.
+    # Options:
+    #   true: last project image remains a deformation image.
+    #   false: last project image is treated as a user-provided mask image.
+    enabled: true
+
+    # Output directory for automatically generated ROI masks.
+    # Relative to project.result_dir.
+    output_dir: dense/auto_roi
+
+  model_init:
+    # Camera depth network used to initialize camera-coordinate Z depth.
+    model: SfMDepthFiLMNet
+
+    # Depth is normalized as z_norm=(z-depth_mean)/depth_std.
+    depth_normalization: mean_std
+
+    # Initial depth model checkpoint.
+    # Relative to project.result_dir.
+    checkpoint: dense/model_init/depth_film_init.pt
+
+  znssd_opt:
+    # Patch radius for ZNSSD optimization.
+    # radius=2 means 5x5 patches.
+    patch_radius: 2
+
+    # Optimized depth model checkpoint.
+    # Relative to project.result_dir.
+    checkpoint: dense/znssd_opt/depth_film_znssd.pt
+
+    # Output directory for ZNSSD optimization products.
+    # Relative to project.result_dir.
+    output_dir: dense/znssd_opt
+
+  reconstruction_dense:
+    # Output directory for dense reconstructed point/depth products.
+    # Relative to project.result_dir.
+    output_dir: dense/reconstruction_dense
+
+  surface_sampler:
+    # Output deformation reference surface dataset.
+    # Relative to project.result_dir.
+    output: dense/surface_sampler/deformation_surface_dataset.npz
+
+    # Minimum number of cameras that must agree for a surface point to be used.
+    min_visible_cameras: 2
+
+    # Relative global sparse sampling spacing. The sampler converts this to an
+    # actual SfM-space spacing from the reconstructed surface scale.
+    # Smaller values produce more points; larger values thin the surface.
+    relative_sample_spacing: 0.006
+
+    # This sampler is not SDF/UDF. It uses per-camera 2.5D ROI depth candidates,
+    # multi-camera depth consistency, and global 3D thinning.
+    method: multi_view_2p5d_depth_consistency

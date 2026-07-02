@@ -1,0 +1,67 @@
+# 2_sfm.yaml
+# Purpose:
+#   Configure sparse reference SfM. This module estimates self-calibrated camera
+#   intrinsics/extrinsics and sparse 3D points from the reference images only.
+#
+# Scientific role:
+#   SfM defines the initial arbitrary-scale 3D coordinate frame used by dense
+#   reconstruction and neural deformation. Absolute scale is not solved here.
+
+sfm:
+  # Input image folder relative to project.data_dir.
+  image_dir: images
+
+  # Which image in each camera folder is used for SfM.
+  # Options:
+  #   first: use the first sorted image from project.image_sequence.
+  ref_mode: first
+
+  # Camera used to define the final SfM-world axis convention.
+  # Current convention: origin = sparse point centroid, axes aligned with cam_0.
+  reference_camera: cam_0
+
+  # Output directory for SfM products, relative to project.result_dir.
+  output_dir: sfm
+
+  feature:
+    # Maximum number of SIFT features per image.
+    # Increase for weak texture; decrease for speed.
+    max_features: 8192
+
+    # SIFT first octave.
+    # Typical choices:
+    #   0: standard image scale.
+    #  -1: upsample image first, can help small features but costs more.
+    first_octave: 0
+
+  matching:
+    # Exhaustive matching is reasonable for 12 cameras.
+    # Future options could include sequential, spatial, or custom rig matching.
+    matcher: exhaustive
+
+    # Cross-check makes matches stricter but may reduce match count.
+    cross_check: false
+
+  mapping:
+    # Minimum accepted matches between two images.
+    min_num_matches: 8
+
+    # Minimum registered image count for a model to be considered valid.
+    min_model_size: 3
+
+    # Bundle-adjustment global refinement count. Higher values may improve
+    # geometry but add runtime.
+    ba_global_max_refinements: 5
+
+    # Maximum reprojection error threshold for exported observations.
+    max_reproj_error: 4.0
+
+  output:
+    # Remove previous COLMAP database/reconstruction before running.
+    clean: false
+
+    # Save camera/point visualization PNGs.
+    visualize: true
+
+    # DPI for visualization outputs.
+    dpi: 180

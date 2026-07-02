@@ -21,7 +21,7 @@ class ChessboardScaleConfig:
     data_dir: str = "case/CylinderDIC"
     sfm_dir: str | None = None
     image_dir: str = "calibrate_images"
-    image_name: str = "001"
+    image_name: str | None = None
     output_dir: str | None = None
     inner_cols: int = 9
     inner_rows: int = 7
@@ -47,6 +47,17 @@ def find_named_image(cam_dir: Path, stem: str) -> Path:
         if path.exists():
             return path
     raise FileNotFoundError(f"No image named {stem} with supported extension in {cam_dir}")
+
+
+def find_single_image(cam_dir: Path) -> Path:
+    if not cam_dir.is_dir():
+        raise FileNotFoundError(cam_dir)
+    images = sorted([p for p in cam_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS])
+    if len(images) != 1:
+        raise FileNotFoundError(
+            f"Expected exactly one calibration image in {cam_dir}, found {len(images)}"
+        )
+    return images[0]
 
 
 def detect_chessboard_corners(
@@ -275,7 +286,8 @@ def run_chessboard_scale(config: ChessboardScaleConfig | None = None) -> Dict[st
 
     print("[sfm2world] Detecting chessboard corners")
     for cam_id, cam_name in enumerate(cam_names):
-        img_path = find_named_image(image_root / cam_name, cfg.image_name)
+        cam_dir = image_root / cam_name
+        img_path = find_named_image(cam_dir, cfg.image_name) if cfg.image_name else find_single_image(cam_dir)
         ok, corners, image = detect_chessboard_corners(img_path, pattern_size, cfg.subpix_window)
         if ok and len(corners) == n_corners:
             detections[cam_id] = corners
@@ -422,7 +434,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_dir", type=str, default="case/CylinderDIC")
     parser.add_argument("--sfm_dir", type=str, default="")
     parser.add_argument("--image_dir", type=str, default="calibrate_images")
-    parser.add_argument("--image_name", type=str, default="001")
+    parser.add_argument("--image_name", type=str, default="")
     parser.add_argument("--output_dir", type=str, default="")
     parser.add_argument("--inner_cols", type=int, required=True, help="Number of inner corners along board width.")
     parser.add_argument("--inner_rows", type=int, required=True, help="Number of inner corners along board height.")
@@ -441,7 +453,7 @@ def main() -> None:
         data_dir=args.data_dir,
         sfm_dir=args.sfm_dir or None,
         image_dir=args.image_dir,
-        image_name=args.image_name,
+        image_name=args.image_name or None,
         output_dir=args.output_dir or None,
         inner_cols=args.inner_cols,
         inner_rows=args.inner_rows,

@@ -216,6 +216,14 @@ def run_deformation_training(config: DeformationTrainingConfig | None = None) ->
                 "displacement_scale": field_cfg.output_scale,
                 "sfm2world_scale": world_scale,
                 "best_record": best_record,
+                "output_units": {
+                    "points": "world scale" if world_scale != 1.0 else "SfM scale",
+                    "displacement": "world scale" if world_scale != 1.0 else "SfM scale",
+                    "displacement_magnitude": "world scale" if world_scale != 1.0 else "SfM scale",
+                    "points_sfm": "SfM scale",
+                    "displacement_sfm": "SfM scale",
+                    "displacement_magnitude_sfm": "SfM scale",
+                },
                 "output_schema": {
                     "checkpoint": "deformation_field.pt",
                     "best_checkpoint": "deformation_field_best.pt",

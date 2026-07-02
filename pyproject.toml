@@ -1,8 +1,8 @@
 [project]
 name = "ndef-dic"
-version = "0.1.0"
+version = "0.2.0"
 
-description = "NDeF-DIC: Neural Deformation Field for Multi-Camera Digital Image Correlation — NeRF-based unified 3D representation for stitch-free multi-camera DIC measurement"
+description = "NDeF-DIC: config-driven multi-camera digital image correlation with SfM, physical scale recovery, dense reference surfaces, and neural deformation fields"
 license = { file = "LICENSE" }
 readme = "README.md"
 authors = [
@@ -14,12 +14,13 @@ requires-python = ">=3.10"
 keywords = [
   "dic",
   "digital-image-correlation",
-  "nerf",
-  "neural-radiance-field",
+  "neural-field",
   "multi-camera",
+  "sfm",
+  "structure-from-motion",
   "3d-reconstruction",
   "deformation-field",
-  "sdf",
+  "photometric-optimization",
   "scientific-machine-learning",
   "computer-vision",
 ]
@@ -51,6 +52,8 @@ dependencies = [
   # Data & scientific
   "scipy>=1.10.0",
   "matplotlib>=3.7.0",
+  # Configuration
+  "pyyaml>=6.0",
   # Utilities
   "tqdm>=4.65.0",
   "tensorboard>=2.13.0",
@@ -64,7 +67,7 @@ Documentation = "https://github.com/lbd-hfut/NDeF-DIC"
 [project.optional-dependencies]
 # COLMAP integration (for reading .mat calibration files, running SfM)
 colmap = [
-  "pycolmap>=4.0",
+  "pycolmap>=0.6.0",
   "scipy>=1.10.0",
 ]
 
@@ -98,10 +101,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ndef_dic"]
+include = [
+  "configs",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
   "ndef_dic",
+  "configs",
   "run.py",
   "LICENSE",
   "README.md",

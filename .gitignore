@@ -219,9 +219,6 @@ __marimo__/
 
 CLAUDE.md
 .claude/
-docs/superpowers/
-docs/neural-implicit-projection-zssd.md
-docs/new_plan.md
 
 case/**/*.png
 case/**/*.html
@@ -234,8 +231,6 @@ case/**/dense/
 case/**/ground_truth/
 case/**/pinn_stereo_out/
 case/**/sparse/
-config/local.yaml
-checkpoints/
 
 # Project-generated outputs
 case/**/result/
