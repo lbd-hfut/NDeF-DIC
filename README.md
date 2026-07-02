@@ -209,13 +209,13 @@ max  |u|, world:    about 0.499
 
 Result visualizations:
 
-![Deformation components](case/CylinderDIC/result/deformation/01/deformation_3d_components.png)
+![Deformation components](docs/result_deformation_3d_components.png)
 
-![Deformation loss](case/CylinderDIC/result/deformation/01/deformation_loss_curve.png)
+![Deformation loss](docs/result_deformation_loss_curve.png)
 
-![Patch-DIC pre-calculation](case/CylinderDIC/result/deformation/precalculation/patch_dic_sparse/01/patch_dic_displacement_3d.png)
+![Patch-DIC pre-calculation](docs/result_patch_dic_displacement_3d.png)
 
-![Auto ROI summary](case/CylinderDIC/result/dense/auto_roi/auto_roi_summary.png)
+![Auto ROI summary](docs/result_auto_roi_summary.png)
 
 ## Output Data
 
