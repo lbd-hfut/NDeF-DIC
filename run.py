@@ -23,6 +23,13 @@ def parse_args():
     parser.add_argument("--image-dir", type=str, default="images", help="Image folder inside data-dir")
     parser.add_argument("--ref-name", type=str, default="001", help="Reference image basename")
     parser.add_argument("--reference-camera", type=str, default="cam_0", help="World-axis reference camera")
+    parser.add_argument(
+        "--deformation-loss",
+        type=str,
+        default="mse",
+        choices=("mse", "znssd"),
+        help="Photometric loss for step 7 deformation training",
+    )
     parser.add_argument("--clean", action="store_true", help="Remove previous generated outputs")
     parser.add_argument(
         "--skip-sfm",
@@ -65,6 +72,98 @@ def run_dense_model_init(args):
     )
 
 
+def run_reconstruction_dataset(args):
+    from ndef_dic.dense import ReconstructionDatasetConfig, run_reconstruction_dataset as build_dataset
+
+    return build_dataset(
+        ReconstructionDatasetConfig(
+            data_dir=args.data_dir,
+            sfm_dir=os.path.join(args.data_dir, "result", "sfm"),
+            model_init_dir=os.path.join(args.data_dir, "result", "dense", "model_init"),
+            output_dir=os.path.join(args.data_dir, "result", "dense", "reconstruction_dataset"),
+        )
+    )
+
+
+def run_dense_znssd(args):
+    from ndef_dic.dense import DenseZNSSDConfig, run_dense_znssd as optimize_dense
+
+    return optimize_dense(
+        DenseZNSSDConfig(
+            data_dir=args.data_dir,
+            sfm_dir=os.path.join(args.data_dir, "result", "sfm"),
+            model_init_dir=os.path.join(args.data_dir, "result", "dense", "model_init"),
+            dataset_dir=os.path.join(args.data_dir, "result", "dense", "reconstruction_dataset"),
+            output_dir=os.path.join(args.data_dir, "result", "dense", "znssd_opt"),
+            max_steps_per_epoch=None,
+        )
+    )
+
+
+def run_dense_reconstruction(args):
+    from ndef_dic.dense import DenseReconstructionConfig, run_dense_reconstruction as export_dense
+
+    return export_dense(
+        DenseReconstructionConfig(
+            data_dir=args.data_dir,
+            sfm_dir=os.path.join(args.data_dir, "result", "sfm"),
+            model_init_dir=os.path.join(args.data_dir, "result", "dense", "model_init"),
+            znssd_dir=os.path.join(args.data_dir, "result", "dense", "znssd_opt"),
+            output_dir=os.path.join(args.data_dir, "result", "dense", "reconstruction_dense"),
+        )
+    )
+
+
+def run_surface_sampler(args):
+    from ndef_dic.dense import SurfaceSamplerConfig, run_surface_sampler as sample_surface
+
+    return sample_surface(
+        SurfaceSamplerConfig(
+            data_dir=args.data_dir,
+            sfm_dir=os.path.join(args.data_dir, "result", "sfm"),
+            model_init_dir=os.path.join(args.data_dir, "result", "dense", "model_init"),
+            reconstruction_dense_dir=os.path.join(args.data_dir, "result", "dense", "reconstruction_dense"),
+            output_dir=os.path.join(args.data_dir, "result", "dense", "surface_sampler"),
+        )
+    )
+
+
+def run_deformation(args):
+    from ndef_dic.deformation import DeformationTrainingConfig, run_deformation_training
+
+    return run_deformation_training(
+        DeformationTrainingConfig(
+            data_dir=args.data_dir,
+            sfm_dir=os.path.join(args.data_dir, "result", "sfm"),
+            surface_dataset_path=os.path.join(
+                args.data_dir,
+                "result",
+                "dense",
+                "surface_sampler",
+                "deformation_surface_dataset.npz",
+            ),
+            output_dir=os.path.join(args.data_dir, "result", "deformation"),
+            image_dir=args.image_dir,
+            reference_name=args.ref_name,
+            current_name="002",
+            use_positional_encoding=False,
+            photometric_loss=args.deformation_loss,
+            patch_radius=2,
+            invalid_patch_penalty=0.05,
+            lr=1e-4,
+            displacement_scale_path=os.path.join(
+                args.data_dir,
+                "result",
+                "deformation",
+                "precalculation",
+                "patch_dic_sparse",
+                "displacement_scale.json",
+            ),
+            displacement_scale_stat="mean",
+        )
+    )
+
+
 def main():
     args = parse_args()
     steps = [int(s.strip()) for s in args.steps.split(",") if s.strip()]
@@ -100,7 +199,57 @@ def main():
         for name, path in fig_paths.items():
             print(f"  {name}: {path}")
 
-    unsupported = [s for s in steps if s not in {1, 2}]
+    if 3 in steps:
+        print("\n" + "#" * 60)
+        print("# STEP 3: Multi-View Reconstruction Dataset")
+        print("#" * 60)
+        start = time.time()
+        dataset_paths = run_reconstruction_dataset(args)
+        print(f"\n[Step 3] Done in {time.time() - start:.0f}s")
+        for name, path in dataset_paths.items():
+            print(f"  {name}: {path}")
+
+    if 4 in steps:
+        print("\n" + "#" * 60)
+        print("# STEP 4: Dense ZNSSD Depth Optimisation")
+        print("#" * 60)
+        start = time.time()
+        znssd_paths = run_dense_znssd(args)
+        print(f"\n[Step 4] Done in {time.time() - start:.0f}s")
+        for name, path in znssd_paths.items():
+            print(f"  {name}: {path}")
+
+    if 5 in steps:
+        print("\n" + "#" * 60)
+        print("# STEP 5: Export ZNSSD Dense Reconstruction")
+        print("#" * 60)
+        start = time.time()
+        recon_paths = run_dense_reconstruction(args)
+        print(f"\n[Step 5] Done in {time.time() - start:.0f}s")
+        for name, path in recon_paths.items():
+            print(f"  {name}: {path}")
+
+    if 6 in steps:
+        print("\n" + "#" * 60)
+        print("# STEP 6: Visibility-Aware Reference Surface Sampler")
+        print("#" * 60)
+        start = time.time()
+        surface_paths = run_surface_sampler(args)
+        print(f"\n[Step 6] Done in {time.time() - start:.0f}s")
+        for name, path in surface_paths.items():
+            print(f"  {name}: {path}")
+
+    if 7 in steps:
+        print("\n" + "#" * 60)
+        print("# STEP 7: Surface Neural Deformation Field")
+        print("#" * 60)
+        start = time.time()
+        deformation_paths = run_deformation(args)
+        print(f"\n[Step 7] Done in {time.time() - start:.0f}s")
+        for name, path in deformation_paths.items():
+            print(f"  {name}: {path}")
+
+    unsupported = [s for s in steps if s not in {1, 2, 3, 4, 5, 6, 7}]
     if unsupported:
         raise NotImplementedError(
             f"Steps {unsupported} are not implemented in the current research pipeline."

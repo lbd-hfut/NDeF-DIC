@@ -2,7 +2,7 @@
 
 This module does one deliberately limited job: learn a continuous,
 camera-conditioned Z-depth field from sparse SfM observations, then evaluate it
-inside each camera's observed-feature convex hull.  The result is an
+inside ROI masks supplied by ``roi_builder.py``.  The result is an
 initialisation and diagnostic product for the later dense DIC stage, not a
 standalone dense reconstruction claim.
 """
@@ -41,6 +41,9 @@ class DepthInitConfig:
     log_interval: int = 250
     prediction_batch_size: int = 262144
     point_plot_stride: int = 20
+    roi_dir: str | None = None
+    use_external_roi: bool = False
+    external_roi_dir: str | None = None
     seed: int = 7
     device: str = "auto"
 
@@ -142,10 +145,18 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         device=device,
     )
 
-    hull_products = _predict_inside_hulls(
+    roi_products = _prepare_roi_masks(
+        data_dir=data_dir,
+        sfm_dir=sfm_dir,
+        cam_names=cam_names,
+        cfg=cfg,
+    )
+
+    dense_products = _predict_inside_roi_masks(
         model=model,
         observations=obs,
         image_sizes=image_sizes,
+        roi_products=roi_products,
         depth_mean=depth_mean,
         depth_std=depth_std,
         K=K,
@@ -166,7 +177,7 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         device=device,
     )
 
-    _save_dense_products(output_dir, cam_names, hull_products)
+    _save_dense_products(output_dir, cam_names, dense_products)
     np.savez_compressed(
         output_dir / "dense_model_init.npz",
         cam_names=np.asarray(cam_names),
@@ -176,6 +187,7 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         sparse_error=diagnostics["error"],
         sparse_pred_depth=diagnostics["pred_depth"],
     )
+    _save_depth_normalization(output_dir, depth_mean, depth_std)
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -193,7 +205,7 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         output_dir=output_dir,
         cam_names=cam_names,
         sparse_points=sparse["points3D"].astype(np.float64),
-        hull_products=hull_products,
+        dense_products=dense_products,
         observations=obs,
         sparse_errors=diagnostics["error"],
         cfg=cfg,
@@ -293,10 +305,60 @@ def _smoothness_loss(
     return torch.mean(grad**2)
 
 
-def _predict_inside_hulls(
+def _prepare_roi_masks(
+    data_dir: Path,
+    sfm_dir: Path,
+    cam_names: List[str],
+    cfg: DepthInitConfig,
+) -> List[Dict[str, np.ndarray]]:
+    from .roi_builder import ROIConfig, run_auto_roi
+
+    roi_output_dir = Path(cfg.roi_dir) if cfg.roi_dir else data_dir / "result" / "dense" / "auto_roi"
+    roi_masks = run_auto_roi(
+        data_dir=str(data_dir),
+        sfm_dir=str(sfm_dir),
+        output_dir=str(roi_output_dir),
+        config=ROIConfig(
+            use_external=cfg.use_external_roi,
+            external_roi_dir=cfg.external_roi_dir,
+        ),
+        verbose=True,
+    )
+    if len(roi_masks) != len(cam_names):
+        raise ValueError(f"ROI camera count {len(roi_masks)} does not match SfM camera count {len(cam_names)}")
+
+    products = []
+    for cm, expected_name in zip(roi_masks, cam_names):
+        if cm.cam_name != expected_name:
+            raise ValueError(f"ROI camera order mismatch: got {cm.cam_name}, expected {expected_name}")
+        products.append(
+            {
+                "cam_id": int(cm.cam_id),
+                "cam_name": cm.cam_name,
+                "mask": cm.mask.astype(bool),
+                "contour": _mask_outer_contour(cm.mask),
+                "roi_source": "external" if cfg.use_external_roi else "auto",
+                "roi_dir": str(roi_output_dir),
+            }
+        )
+    return products
+
+
+def _mask_outer_contour(mask: np.ndarray) -> np.ndarray:
+    import cv2
+
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.empty((0, 2), dtype=np.float32)
+    contour = max(contours, key=cv2.contourArea).reshape(-1, 2)
+    return contour.astype(np.float32)
+
+
+def _predict_inside_roi_masks(
     model: SfMDepthFiLMNet,
     observations: Dict[str, np.ndarray],
     image_sizes: np.ndarray,
+    roi_products: List[Dict[str, np.ndarray]],
     depth_mean: float,
     depth_std: float,
     K: np.ndarray,
@@ -306,18 +368,21 @@ def _predict_inside_hulls(
     cfg: DepthInitConfig,
     device: torch.device,
 ) -> List[Dict[str, np.ndarray]]:
-    import cv2
-
     products = []
     for cam_id, (width, height) in enumerate(image_sizes):
         uv = observations["uv"][observations["cam_indices"] == cam_id].astype(np.float64)
         if len(uv) < 3:
             raise ValueError(f"Camera {cam_id} has fewer than 3 SfM observations.")
 
-        hull = cv2.convexHull(uv.astype(np.float32)).reshape(-1, 2)
-        mask = np.zeros((int(height), int(width)), dtype=np.uint8)
-        cv2.fillPoly(mask, [np.round(hull).astype(np.int32)], 1)
+        mask = roi_products[cam_id]["mask"]
+        if mask.shape != (int(height), int(width)):
+            raise ValueError(
+                f"ROI mask shape for camera {cam_id} is {mask.shape}, "
+                f"expected {(int(height), int(width))}"
+            )
         rows, cols = np.nonzero(mask)
+        if len(rows) == 0:
+            raise ValueError(f"ROI mask for camera {cam_id} is empty.")
         pixels = np.stack([cols, rows], axis=1).astype(np.float64)
 
         xy_norm = _normalise_pixels(
@@ -340,15 +405,20 @@ def _predict_inside_hulls(
         products.append(
             {
                 "cam_id": np.asarray(cam_id),
-                "hull": hull,
-                "mask": mask.astype(bool),
+                "contour": roi_products[cam_id]["contour"],
+                "mask": mask,
                 "pixels": pixels.astype(np.float32),
                 "pred_depth": pred_depth.astype(np.float32),
                 "interp_depth": interp_depth.astype(np.float32),
                 "world": world.astype(np.float32),
+                "roi_source": np.asarray(roi_products[cam_id]["roi_source"]),
+                "roi_dir": np.asarray(roi_products[cam_id]["roi_dir"]),
             }
         )
-        print(f"[DenseInit] cam_{cam_id}: predicted {len(pixels)} convex-hull pixels")
+        print(
+            f"[DenseInit] cam_{cam_id}: predicted {len(pixels)} ROI pixels "
+            f"from {roi_products[cam_id]['roi_source']} ROI"
+        )
     return products
 
 
@@ -447,30 +517,47 @@ def _save_meta(
         json.dump(meta, f, indent=2)
 
 
+def _save_depth_normalization(output_dir: Path, depth_mean: float, depth_std: float) -> None:
+    payload = {
+        "normalization": "z_norm = (z_physical - depth_mean) / depth_std",
+        "denormalization": "z_physical = z_norm * depth_std + depth_mean",
+        "depth_type": "camera-coordinate Z-depth",
+        "coordinate_convention": "x_cam = R @ x_world + t",
+        "depth_mean": depth_mean,
+        "depth_std": depth_std,
+    }
+    with open(output_dir / "depth_normalization.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 def _save_dense_products(
     output_dir: Path,
     cam_names: List[str],
-    hull_products: List[Dict[str, np.ndarray]],
+    dense_products: List[Dict[str, np.ndarray]],
 ) -> None:
     dense_dir = output_dir / "per_camera_dense"
     dense_dir.mkdir(parents=True, exist_ok=True)
     index = []
-    for cam_name, item in zip(cam_names, hull_products):
+    for cam_name, item in zip(cam_names, dense_products):
         path = dense_dir / f"{cam_name}_dense_init.npz"
         np.savez_compressed(
             path,
-            hull=item["hull"],
-            mask=item["mask"],
+            roi_contour=item["contour"],
+            roi_mask=item["mask"],
             pixels=item["pixels"],
             pred_depth=item["pred_depth"],
             sfm_interp_depth=item["interp_depth"],
             world=item["world"],
+            roi_source=item["roi_source"],
+            roi_dir=item["roi_dir"],
         )
         index.append(
             {
                 "cam_name": cam_name,
                 "path": str(path),
                 "n_pixels": int(len(item["pixels"])),
+                "roi_source": str(item["roi_source"]),
+                "roi_dir": str(item["roi_dir"]),
             }
         )
     with open(output_dir / "per_camera_dense_index.json", "w", encoding="utf-8") as f:
@@ -481,7 +568,7 @@ def _save_visualisations(
     output_dir: Path,
     cam_names: List[str],
     sparse_points: np.ndarray,
-    hull_products: List[Dict[str, np.ndarray]],
+    dense_products: List[Dict[str, np.ndarray]],
     observations: Dict[str, np.ndarray],
     sparse_errors: np.ndarray,
     cfg: DepthInitConfig,
@@ -494,14 +581,20 @@ def _save_visualisations(
         "sfm_interpolated_depth": output_dir / "03_sfm_interpolated_depth_maps.png",
         "sparse_error_hist": output_dir / "04_sparse_depth_error_histograms.png",
     }
-    _plot_dense_vs_sparse(paths["dense_vs_sparse"], sparse_points, hull_products, cfg)
-    _plot_depth_grid(paths["predicted_depth"], cam_names, hull_products, "pred_depth", "Predicted Z-depth")
+    _plot_dense_vs_sparse(paths["dense_vs_sparse"], sparse_points, dense_products, cfg)
+    _plot_depth_grid(
+        paths["predicted_depth"],
+        cam_names,
+        dense_products,
+        "pred_depth",
+        "Predicted camera Z-depth, SfM physical scale",
+    )
     _plot_depth_grid(
         paths["sfm_interpolated_depth"],
         cam_names,
-        hull_products,
+        dense_products,
         "interp_depth",
-        "SfM observed depth interpolation",
+        "SfM observed camera Z-depth interpolation, physical scale",
     )
     _plot_error_hist(paths["sparse_error_hist"], cam_names, observations, sparse_errors)
     plt.close("all")
@@ -511,14 +604,14 @@ def _save_visualisations(
 def _plot_dense_vs_sparse(
     path: Path,
     sparse_points: np.ndarray,
-    hull_products: List[Dict[str, np.ndarray]],
+    dense_products: List[Dict[str, np.ndarray]],
     cfg: DepthInitConfig,
 ) -> None:
     import matplotlib.pyplot as plt
 
     dense_chunks = []
     stride = max(1, int(cfg.point_plot_stride))
-    for item in hull_products:
+    for item in dense_products:
         dense_chunks.append(item["world"][::stride])
     dense = np.concatenate(dense_chunks, axis=0)
 
@@ -526,13 +619,13 @@ def _plot_dense_vs_sparse(
     ax1 = fig.add_subplot(1, 2, 1, projection="3d")
     ax2 = fig.add_subplot(1, 2, 2, projection="3d")
     ax1.scatter(sparse_points[:, 0], sparse_points[:, 1], sparse_points[:, 2], s=1.5, c=sparse_points[:, 2], cmap="viridis")
-    ax1.set_title("SfM sparse reconstruction")
+    ax1.set_title("SfM sparse reconstruction, world scale")
     ax2.scatter(dense[:, 0], dense[:, 1], dense[:, 2], s=0.2, c=dense[:, 2], cmap="viridis")
-    ax2.set_title(f"Neural dense init (1/{stride} plotted)")
+    ax2.set_title(f"Neural dense init, SfM world scale (1/{stride} plotted)")
     for ax in (ax1, ax2):
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
+        ax.set_xlabel("SfM world X")
+        ax.set_ylabel("SfM world Y")
+        ax.set_zlabel("SfM world Z")
         _set_axes_equal(ax)
     fig.tight_layout()
     fig.savefig(path)
@@ -541,28 +634,40 @@ def _plot_dense_vs_sparse(
 def _plot_depth_grid(
     path: Path,
     cam_names: List[str],
-    hull_products: List[Dict[str, np.ndarray]],
+    dense_products: List[Dict[str, np.ndarray]],
     key: str,
     title: str,
 ) -> None:
     import matplotlib.pyplot as plt
 
-    values = np.concatenate([item[key] for item in hull_products])
+    values = np.concatenate([item[key] for item in dense_products])
     vmin, vmax = np.nanpercentile(values, [1, 99])
     fig, axes = plt.subplots(3, 4, figsize=(16, 10), dpi=180, constrained_layout=True)
     fig.suptitle(title)
     last_im = None
-    for ax, cam_name, item in zip(axes.ravel(), cam_names, hull_products):
+    for ax, cam_name, item in zip(axes.ravel(), cam_names, dense_products):
         image = np.full(item["mask"].shape, np.nan, dtype=np.float32)
         pixels = item["pixels"].astype(np.int64)
         image[pixels[:, 1], pixels[:, 0]] = item[key]
         last_im = ax.imshow(image, cmap="turbo", vmin=vmin, vmax=vmax)
-        ax.plot(item["hull"][:, 0], item["hull"][:, 1], "w-", linewidth=0.6)
-        ax.plot([item["hull"][-1, 0], item["hull"][0, 0]], [item["hull"][-1, 1], item["hull"][0, 1]], "w-", linewidth=0.6)
+        contour = item["contour"]
+        if len(contour) >= 2:
+            ax.plot(contour[:, 0], contour[:, 1], "w-", linewidth=0.6)
+            ax.plot(
+                [contour[-1, 0], contour[0, 0]],
+                [contour[-1, 1], contour[0, 1]],
+                "w-",
+                linewidth=0.6,
+            )
         ax.set_title(cam_name)
         ax.set_axis_off()
     if last_im is not None:
-        fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.75, label="Z-depth")
+        fig.colorbar(
+            last_im,
+            ax=axes.ravel().tolist(),
+            shrink=0.75,
+            label="Camera Z-depth in SfM physical scale",
+        )
     fig.savefig(path)
 
 
@@ -575,7 +680,7 @@ def _plot_error_hist(
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 4, figsize=(16, 10), dpi=180, constrained_layout=True)
-    fig.suptitle("Sparse observation depth residuals: predicted - SfM")
+    fig.suptitle("Sparse observation Z-depth residuals in SfM physical scale: predicted - SfM")
     for ax, cam_name, cam_id in zip(axes.ravel(), cam_names, range(len(cam_names))):
         err = sparse_errors[observations["cam_indices"] == cam_id]
         if len(err) == 0:
@@ -585,7 +690,7 @@ def _plot_error_hist(
         ax.hist(err, bins=40, weights=weights, color="#4c78a8", edgecolor="white", linewidth=0.3)
         ax.axvline(0.0, color="black", linewidth=0.8)
         ax.set_title(f"{cam_name}  RMSE={np.sqrt(np.mean(err**2)):.4g}")
-        ax.set_xlabel("Depth error")
+        ax.set_xlabel("Camera Z-depth error in SfM physical scale")
         ax.set_ylabel("Ratio")
     fig.savefig(path)
 
