@@ -248,3 +248,4 @@ results/
 *.md
 !README.md
 !**/README.md
+!configs/CONFIG_GUIDE.md
