@@ -964,7 +964,7 @@ def _create_point_cloud_surface(
         points = torch.from_numpy(np.load(npy_path)).float()
         print(f"[SurfaceProvider] Loaded points from {npy_path}")
     elif os.path.exists(pts_path):
-        from ndef_dic.dense_mvs import load_ply
+        from ndef_dic.dense.dense_mvs import load_ply
         points, _ = load_ply(pts_path)
         points = torch.from_numpy(points)
         print(f"[SurfaceProvider] Loaded points from {pts_path}")
@@ -1021,7 +1021,7 @@ def _create_neural_stereo_surface(
     **kwargs,
 ) -> NeuralStereoSurface:
     """从训练好的 D_c 网络创建 NeuralStereoSurface。"""
-    from ndef_dic.pinn_stereo import DepthNetwork
+    from ndef_dic.dense.pinn_stereo import DepthNetwork
 
     network_dir = os.path.join(calib_dir, "stereo_networks")
     if not os.path.isdir(network_dir):

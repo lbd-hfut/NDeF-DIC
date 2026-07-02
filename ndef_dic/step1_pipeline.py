@@ -15,10 +15,17 @@ Modes:
 
 import os
 import json
+import re
 import numpy as np
 from typing import Optional, Dict, List, Literal, Tuple
 from dataclasses import dataclass, field
 from scipy.io import loadmat, savemat
+
+from .common.mat_io import unwrap_mat_cell, unwrap_mat_batch
+
+
+def _natural_key(text: str):
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
 
 
 # =========================================================================
@@ -82,46 +89,21 @@ def load_calibration(calib_dir: str) -> Dict:
     calib = loadmat(cameras_path)
     n_cam = int(calib["num_cameras"][0, 0])
 
-    # ---- Extract K ----
-    K_raw = calib["K_list"]
-    if K_raw.dtype == object:
-        # Old format
-        K_list = [_extract_matrix(K_raw[i], (3, 3)) for i in range(n_cam)]
-    else:
-        # New stacked format: (N, 3, 3)
-        K_list = [K_raw[i] for i in range(n_cam)]
+    # ---- Extract K, R, t (unwrapped once — handles both old/new .mat formats) ----
+    K_batch = unwrap_mat_batch(calib["K_list"], (3, 3))              # (N, 3, 3)
+    R_batch = unwrap_mat_batch(calib["cam_from_world_R"], (3, 3))    # (N, 3, 3)
+    t_batch = unwrap_mat_batch(calib["cam_from_world_t"], (3, 1))    # may be (N,3) or (N,3,1)
 
-    # ---- Extract R ----
-    R_raw = calib["cam_from_world_R"]
-    if R_raw.dtype == object:
-        R_list = [_extract_matrix(R_raw[i], (3, 3)) for i in range(n_cam)]
-    else:
-        R_list = [R_raw[i] for i in range(n_cam)]
-
-    # ---- Extract t ----
-    t_raw = calib["cam_from_world_t"]
-    if t_raw.dtype == object:
-        t_list = [_extract_matrix(t_raw[i], (3, 1)) for i in range(n_cam)]
-    else:
-        # New format: (N, 1, 3) or (N, 3, 1) or (N, 3)
-        shape = t_raw.shape
-        if len(shape) == 3:
-            if shape[2] == 1:
-                t_list = [t_raw[i].reshape(3, 1) for i in range(n_cam)]
-            elif shape[1] == 1:
-                t_list = [t_raw[i].reshape(3, 1) for i in range(n_cam)]
-            else:
-                t_list = [t_raw[i].reshape(3, 1) for i in range(n_cam)]
-        else:
-            t_list = [t_raw[i].reshape(3, 1) for i in range(n_cam)]
+    K_list = [K_batch[i] for i in range(n_cam)]
+    R_list = [R_batch[i] for i in range(n_cam)]
+    # Normalise t to (3, 1) per camera (numeric .mat files often store (N, 3) flat)
+    t_list = [t_batch[i].reshape(3, 1) for i in range(n_cam)]
 
     # ---- Extract dist ----
     dist_raw = calib.get("dist_list")
     if dist_raw is not None:
-        if dist_raw.dtype == object:
-            dist_list = [_extract_matrix(dist_raw[i], (5,)) for i in range(n_cam)]
-        else:
-            dist_list = [dist_raw[i] for i in range(n_cam)]
+        dist_batch = unwrap_mat_batch(dist_raw, (5,))                 # (N, 5)
+        dist_list = [dist_batch[i] for i in range(n_cam)]
     else:
         dist_list = [np.zeros(5) for _ in range(n_cam)]
 
@@ -141,6 +123,21 @@ def load_calibration(calib_dir: str) -> Dict:
     else:
         camera_models = ["PINHOLE"] * n_cam
 
+    def _extract_string_list(raw, n_expected):
+        if raw is None:
+            return None
+        flat = raw.flatten()
+        values = []
+        for i in range(min(n_expected, len(flat))):
+            item = flat[i]
+            if hasattr(item, "flat") and item.dtype == object:
+                item = item.flat[0]
+            values.append(str(item))
+        return values
+
+    cam_names = _extract_string_list(calib.get("cam_names"), n_cam)
+    image_names = _extract_string_list(calib.get("image_names"), n_cam)
+
     # ---- Derive P ----
     P_list = [
         K_list[i] @ np.hstack((R_list[i], t_list[i]))
@@ -155,18 +152,20 @@ def load_calibration(calib_dir: str) -> Dict:
         "camera_models": camera_models,
         "P_list": P_list,
         "num_cameras": n_cam,
+        "cam_names": cam_names,
+        "image_names": image_names,
     }
 
 
-def _extract_matrix(obj: np.ndarray, shape: Tuple[int, ...]) -> np.ndarray:
-    """Extract a clean float array from a nested object array."""
-    flat = np.array([float(obj.flat[i].item()) for i in range(obj.size)])
-    return flat.reshape(shape).astype(np.float64)
-
-
-# =========================================================================
-# Image discovery
-# =========================================================================
+def _load_sparse_points(calib_dir: str) -> Optional[np.ndarray]:
+    """Load sparse points3D from points3D.mat if available."""
+    pts_path = os.path.join(calib_dir, "points3D.mat")
+    if not os.path.exists(pts_path):
+        return None
+    data = loadmat(pts_path)
+    if "points3D" in data:
+        return unwrap_mat_batch(data["points3D"], (3,))
+    return None
 
 def _discover_images(image_dir: str, ref_name: str = "001") -> Tuple[List[str], List[str]]:
     """
@@ -184,7 +183,7 @@ def _discover_images(image_dir: str, ref_name: str = "001") -> Tuple[List[str], 
     cam_names = sorted([
         d for d in os.listdir(image_dir)
         if os.path.isdir(os.path.join(image_dir, d)) and d.startswith("cam_")
-    ])
+    ], key=_natural_key)
 
     if not cam_names:
         raise FileNotFoundError(f"No cam_* directories under {image_dir}")
@@ -211,25 +210,6 @@ def _discover_images(image_dir: str, ref_name: str = "001") -> Tuple[List[str], 
 
     return cam_names, ref_paths
 
-
-# =========================================================================
-# Merge sparse + ground truth
-# =========================================================================
-
-def _load_sparse_points(calib_dir: str) -> Optional[np.ndarray]:
-    """Load sparse points3D from points3D.mat if available."""
-    pts_path = os.path.join(calib_dir, "points3D.mat")
-    if not os.path.exists(pts_path):
-        return None
-    data = loadmat(pts_path)
-    if "points3D" in data:
-        pts = data["points3D"]
-        if pts.dtype == object:
-            return _extract_matrix(pts, (pts.shape[0], 3))
-        return pts.astype(np.float64)
-    return None
-
-
 # =========================================================================
 # Main pipeline
 # =========================================================================
@@ -246,6 +226,8 @@ def run_step1(
     image_height: int = 1080,
     post_config: Optional[Dict] = None,
     clean: bool = False,
+    scale_correction_config: Optional[Dict] = None,
+    reference_camera: str = "cam_0",
 ) -> Step1Output:
     """
     Run Step 1: Geometric Reconstruction.
@@ -261,17 +243,21 @@ def run_step1(
         ref_name:        Reference image base name (default: "001").
         image_width:     Image width (used for visibility computation).
         image_height:    Image height (used for visibility computation).
-        post_config:     Optional dict for post-processing parameters.
-        clean:           Remove existing results before running.
+        post_config:              Optional dict for post-processing parameters.
+        clean:                    Remove existing results before running.
+        scale_correction_config:  Optional dict for scale correction. Keys:
+            enabled (bool), method (str), scale (float, for manual),
+            cylinder_radius (float, for auto_cylinder).
+        reference_camera: Camera whose axes define the SfM world frame.
 
     Returns:
         Step1Output with calibration, points, normals, and visibility.
     """
-    from . import colmap_calib
-    from . import dense_mvs
-    from . import postprocess
+    from .sfm.reference_sfm import reference_sfm_exists, run_reference_sfm
+    from .dense import dense_mvs
+    from .common import postprocess
 
-    calib_dir = calib_dir or os.path.join(data_dir, "calibration")
+    calib_dir = calib_dir or os.path.join(data_dir, "result", "sfm")
     dense_workspace = dense_workspace or os.path.join(data_dir, "dense_workspace")
     os.makedirs(calib_dir, exist_ok=True)
 
@@ -286,33 +272,21 @@ def run_step1(
     # =====================================================================
     if sparse_mode == "full":
         print(f"[Step 1] Sparse mode: full (COLMAP SfM)")
-        # Copy images to a flat directory for COLMAP
-        colmap_image_dir = os.path.join(calib_dir, "colmap_images")
-        if clean and os.path.exists(colmap_image_dir):
-            import shutil
-            shutil.rmtree(colmap_image_dir)
-        os.makedirs(colmap_image_dir, exist_ok=True)
-
-        import cv2
-        for cam_name, ref_path in zip(cam_names, ref_paths):
-            new_name = f"{cam_name}_{os.path.basename(ref_path)}"
-            img = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                raise RuntimeError(f"Failed to read: {ref_path}")
-            cv2.imwrite(os.path.join(colmap_image_dir, new_name), img)
-
-        colmap_calib.run_colmap_calibration(
+        run_reference_sfm(
             data_dir=data_dir,
             image_dir=image_dir,
             ref_mode="named",
             ref_name=ref_name,
             output_dir=calib_dir,
+            reference_camera=reference_camera,
             clean=clean,
+            cross_check=False,
+            min_num_matches=8,
         )
 
     elif sparse_mode == "skip_sfm":
         print(f"[Step 1] Sparse mode: skip_sfm (loading from {calib_dir})")
-        if not colmap_calib.calibration_exists(data_dir, calib_dir):
+        if not reference_sfm_exists(data_dir, calib_dir):
             raise FileNotFoundError(
                 f"No calibration found at {calib_dir}/cameras.mat. "
                 f"Run with sparse_mode='full' first, or provide calibration from Step 0."
@@ -331,6 +305,42 @@ def run_step1(
     P_list = calib_data["P_list"]
 
     print(f"[Step 1] Loaded calibration: {num_cameras} cameras")
+
+    # =====================================================================
+    # Scale correction (after SfM, before dense reconstruction)
+    # =====================================================================
+    if scale_correction_config and scale_correction_config.get("enabled", False):
+        from .sfm import scale_correction
+
+        method = scale_correction_config.get("method", "manual")
+        sc_result = scale_correction.run_scale_correction(
+            calib_dir=calib_dir,
+            method=method,
+            scale=float(scale_correction_config.get("scale", 1.0)),
+            cylinder_radius=float(scale_correction_config.get("cylinder_radius", 80.0)),
+            working_distance=float(scale_correction_config.get("working_distance", 300.0)),
+            image_paths=ref_paths if method == "checkerboard" else None,
+            K_list=K_list if method == "checkerboard" else None,
+            dist_list=dist_list if method == "checkerboard" else None,
+        )
+        scale_factor = sc_result["scale"]
+        if scale_factor != 1.0:
+            # Re-load calibration with corrected scale
+            calib_data = load_calibration(calib_dir)
+            K_list = calib_data["K_list"]
+            R_list = calib_data["R_list"]
+            t_list = calib_data["t_list"]
+            dist_list = calib_data["dist_list"]
+            camera_models = calib_data["camera_models"]
+            P_list = calib_data["P_list"]
+            print(f"[Step 1] Re-loaded calibration after scale correction (×{scale_factor:.4f})")
+
+    # =====================================================================
+    # SfM visualisation
+    # =====================================================================
+    sparse_pts = _load_sparse_points(calib_dir)
+    sfm_out_dir = os.path.join(data_dir, "result", "sfm")
+    print(f"[Step 1] SfM products available in {sfm_out_dir}")
 
     # =====================================================================
     # Dense reconstruction
@@ -375,7 +385,7 @@ def run_step1(
     elif dense_path == "pinn_stereo":
         print(f"[Step 1] Dense path: pinn_stereo")
 
-        from . import pinn_stereo
+        from .dense import pinn_stereo
         dense_result = pinn_stereo.run_pinn_stereo(
             image_dir=img_root,
             sfm_path=os.path.join(calib_dir, "colmap_sfm"),
@@ -401,7 +411,6 @@ def run_step1(
     # Assemble point cloud for post-processing
     # =====================================================================
     # Priority: dense MVS > ground truth (Step 0) > sparse SfM
-    sparse_pts = _load_sparse_points(calib_dir)
     num_sparse = len(sparse_pts) if sparse_pts is not None else 0
     gt_path = os.path.join(data_dir, "ground_truth", "points_ref.npy")
     gt_pts = np.load(gt_path) if os.path.exists(gt_path) else None

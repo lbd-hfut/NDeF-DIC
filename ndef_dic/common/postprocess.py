@@ -475,9 +475,21 @@ def run_postprocess(
 
     # ---- 3. Normal estimation (if not provided) ----
     if normals_f is None or len(normals_f) != len(points_f):
-        orient_ref = np.array([0.0, 0.0, 0.0])  # Cylinder axis
+        # PCA gives normals up to a sign ambiguity.
+        # Fix: align with radial direction (cylinder surface normals point outward).
         normals_f = estimate_normals(points_f, k=cfg.get("normal_k", 30),
-                                     orient_toward=orient_ref)
+                                     orient_toward=None)
+        # Post-correct: flip any normal pointing toward the cylinder axis (center)
+        # For cylinder, the radial (outward) direction at point (x,y,z) is (x,0,z).
+        pts_radial = points_f.copy()
+        pts_radial[:, 1] = 0.0  # zero out Y component
+        dot_radial = np.sum(normals_f * pts_radial, axis=1)
+        # Flip normals that point inward (negative dot with radial direction)
+        flip_mask = dot_radial < 0
+        normals_f[flip_mask] = -normals_f[flip_mask]
+        n_flipped = flip_mask.sum()
+        print(f"[Step 1 Post] Normals estimated via PCA (k={cfg.get('normal_k', 30)}), "
+              f"{n_flipped}/{len(normals_f)} flipped to outward")
         print(f"[Step 1 Post] Normals estimated via PCA (k={cfg.get('normal_k', 30)})")
 
     # ---- 4. Visibility matrix ----

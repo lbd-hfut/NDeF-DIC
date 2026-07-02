@@ -236,3 +236,20 @@ case/**/pinn_stereo_out/
 case/**/sparse/
 config/local.yaml
 checkpoints/
+
+# Project-generated outputs
+case/**/result/
+case/**/results/
+case/**/output/
+case/**/outputs/
+case/**/dense_workspace/
+case/**/colmap_workspace/
+checkpoints/
+runs/
+outputs/
+results/
+
+# Markdown notes/docs; keep README files tracked
+*.md
+!README.md
+!**/README.md

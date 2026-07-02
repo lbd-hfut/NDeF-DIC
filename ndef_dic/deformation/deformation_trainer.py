@@ -18,7 +18,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
-from .surface_provider import SurfaceProvider, normalize_points, unnormalize_points
+from ..step2_surface_provider import SurfaceProvider, normalize_points, unnormalize_points
 from .deformation_net import DeformationNetwork
 from .dataset import MultiCamDataset
 from .dic_losses import znssd, deformation_smoothness_loss

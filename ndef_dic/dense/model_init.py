@@ -1,0 +1,600 @@
+"""SfM-guided neural depth initialisation for the dense module.
+
+This module does one deliberately limited job: learn a continuous,
+camera-conditioned Z-depth field from sparse SfM observations, then evaluate it
+inside each camera's observed-feature convex hull.  The result is an
+initialisation and diagnostic product for the later dense DIC stage, not a
+standalone dense reconstruction claim.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+
+@dataclass
+class DepthInitConfig:
+    """Configuration for SfM sparse-depth neural initialisation."""
+
+    data_dir: str = "case/CylinderDIC"
+    sfm_dir: str | None = None
+    output_dir: str | None = None
+    hidden_dim: int = 32
+    pixel_layers: int = 3
+    camera_layers: int = 2
+    trunk_layers: int = 3
+    camera_embedding_dim: int = 16
+    epochs: int = 3000
+    lr: float = 1e-3
+    weight_decay: float = 1e-6
+    smooth_weight: float = 1e-4
+    smooth_samples_per_camera: int = 256
+    log_interval: int = 250
+    prediction_batch_size: int = 262144
+    point_plot_stride: int = 20
+    seed: int = 7
+    device: str = "auto"
+
+
+class MLP(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int, layers: int):
+        super().__init__()
+        if layers < 1:
+            raise ValueError("layers must be >= 1")
+        modules: List[nn.Module] = []
+        last_dim = in_dim
+        for _ in range(layers):
+            modules.append(nn.Linear(last_dim, hidden_dim))
+            modules.append(nn.Tanh())
+            last_dim = hidden_dim
+        modules.append(nn.Linear(last_dim, out_dim))
+        self.net = nn.Sequential(*modules)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class SfMDepthFiLMNet(nn.Module):
+    """Camera-conditioned sparse-depth interpolator.
+
+    Pixel coordinates are shared across cameras.  Camera identity is encoded by
+    a learnable embedding that produces FiLM modulation parameters, avoiding a
+    false ordinal meaning for camera ids.
+    """
+
+    def __init__(
+        self,
+        n_cameras: int,
+        hidden_dim: int = 32,
+        camera_embedding_dim: int = 16,
+        pixel_layers: int = 3,
+        camera_layers: int = 2,
+        trunk_layers: int = 3,
+    ):
+        super().__init__()
+        self.pixel_head = MLP(2, hidden_dim, hidden_dim, pixel_layers)
+        self.camera_embedding = nn.Embedding(n_cameras, camera_embedding_dim)
+        self.camera_head = MLP(camera_embedding_dim, hidden_dim, hidden_dim * 2, camera_layers)
+        self.depth_head = MLP(hidden_dim, hidden_dim, 1, trunk_layers)
+
+    def forward(self, pixel_xy_norm: torch.Tensor, cam_indices: torch.Tensor) -> torch.Tensor:
+        pixel_features = self.pixel_head(pixel_xy_norm)
+        camera_features = self.camera_head(self.camera_embedding(cam_indices.long()))
+        gamma, beta = camera_features.chunk(2, dim=-1)
+        fused = (1.0 + 0.1 * gamma) * pixel_features + beta
+        return self.depth_head(fused).squeeze(-1)
+
+
+def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
+    cfg = config or DepthInitConfig()
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+
+    data_dir = Path(cfg.data_dir)
+    sfm_dir = Path(cfg.sfm_dir) if cfg.sfm_dir else data_dir / "result" / "sfm"
+    output_dir = Path(cfg.output_dir) if cfg.output_dir else data_dir / "result" / "dense" / "model_init"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cameras = _load_npz(sfm_dir / "cameras.npz")
+    sparse = _load_npz(sfm_dir / "sparse_points.npz")
+    obs = _load_npz(sfm_dir / "observations.npz")
+
+    cam_names = [str(x) for x in cameras["cam_names"]]
+    K = cameras["K"].astype(np.float64)
+    dist = cameras["dist"].astype(np.float64)
+    R = cameras["R"].astype(np.float64)
+    t = cameras["t"].astype(np.float64).reshape(len(cam_names), 3)
+    image_sizes = _load_image_sizes(cameras["image_paths"])
+
+    train_xy = _normalise_pixels(obs["uv"].astype(np.float64), obs["cam_indices"], image_sizes)
+    train_cam = obs["cam_indices"].astype(np.int64)
+    train_depth = obs["depth"].astype(np.float64)
+    depth_mean = float(train_depth.mean())
+    depth_std = float(train_depth.std() if train_depth.std() > 1e-12 else 1.0)
+    train_target = ((train_depth - depth_mean) / depth_std).astype(np.float32)
+
+    device = _select_device(cfg.device)
+    model = SfMDepthFiLMNet(
+        n_cameras=len(cam_names),
+        hidden_dim=cfg.hidden_dim,
+        camera_embedding_dim=cfg.camera_embedding_dim,
+        pixel_layers=cfg.pixel_layers,
+        camera_layers=cfg.camera_layers,
+        trunk_layers=cfg.trunk_layers,
+    ).to(device)
+
+    history = _train_model(
+        model=model,
+        xy_norm=train_xy,
+        cam_indices=train_cam,
+        target=train_target,
+        image_sizes=image_sizes,
+        cfg=cfg,
+        device=device,
+    )
+
+    hull_products = _predict_inside_hulls(
+        model=model,
+        observations=obs,
+        image_sizes=image_sizes,
+        depth_mean=depth_mean,
+        depth_std=depth_std,
+        K=K,
+        dist=dist,
+        R=R,
+        t=t,
+        cfg=cfg,
+        device=device,
+    )
+
+    diagnostics = _evaluate_sparse_errors(
+        model=model,
+        xy_norm=train_xy,
+        cam_indices=train_cam,
+        sparse_depth=train_depth,
+        depth_mean=depth_mean,
+        depth_std=depth_std,
+        device=device,
+    )
+
+    _save_dense_products(output_dir, cam_names, hull_products)
+    np.savez_compressed(
+        output_dir / "dense_model_init.npz",
+        cam_names=np.asarray(cam_names),
+        depth_mean=np.asarray(depth_mean),
+        depth_std=np.asarray(depth_std),
+        train_loss=np.asarray(history["train_loss"]),
+        sparse_error=diagnostics["error"],
+        sparse_pred_depth=diagnostics["pred_depth"],
+    )
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": asdict(cfg),
+            "depth_mean": depth_mean,
+            "depth_std": depth_std,
+            "cam_names": cam_names,
+            "image_sizes": image_sizes,
+        },
+        output_dir / "depth_film_init.pt",
+    )
+    _save_meta(output_dir, cfg, cam_names, image_sizes, history, depth_mean, depth_std, diagnostics)
+
+    fig_paths = _save_visualisations(
+        output_dir=output_dir,
+        cam_names=cam_names,
+        sparse_points=sparse["points3D"].astype(np.float64),
+        hull_products=hull_products,
+        observations=obs,
+        sparse_errors=diagnostics["error"],
+        cfg=cfg,
+    )
+    return {name: str(path) for name, path in fig_paths.items()}
+
+
+def _load_npz(path: Path) -> Dict[str, np.ndarray]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    data = np.load(path, allow_pickle=True)
+    return {key: data[key] for key in data.files}
+
+
+def _select_device(requested: str) -> torch.device:
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cuda" and not torch.cuda.is_available():
+        print("[DenseInit] CUDA requested but unavailable; using CPU.")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def _load_image_sizes(image_paths: np.ndarray) -> np.ndarray:
+    import cv2
+
+    sizes = []
+    for raw_path in image_paths:
+        path = Path(str(raw_path))
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise FileNotFoundError(f"Cannot read camera image: {path}")
+        height, width = image.shape[:2]
+        sizes.append((width, height))
+    return np.asarray(sizes, dtype=np.int64)
+
+
+def _normalise_pixels(uv: np.ndarray, cam_indices: np.ndarray, image_sizes: np.ndarray) -> np.ndarray:
+    sizes = image_sizes[np.asarray(cam_indices, dtype=np.int64)]
+    x = 2.0 * uv[:, 0] / np.maximum(sizes[:, 0] - 1, 1) - 1.0
+    y = 2.0 * uv[:, 1] / np.maximum(sizes[:, 1] - 1, 1) - 1.0
+    return np.stack([x, y], axis=1).astype(np.float32)
+
+
+def _train_model(
+    model: SfMDepthFiLMNet,
+    xy_norm: np.ndarray,
+    cam_indices: np.ndarray,
+    target: np.ndarray,
+    image_sizes: np.ndarray,
+    cfg: DepthInitConfig,
+    device: torch.device,
+) -> Dict[str, List[float]]:
+    x = torch.as_tensor(xy_norm, dtype=torch.float32, device=device)
+    cam = torch.as_tensor(cam_indices, dtype=torch.long, device=device)
+    y = torch.as_tensor(target, dtype=torch.float32, device=device)
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    history = {"train_loss": []}
+
+    print(
+        f"[DenseInit] Training {len(x)} sparse depth observations on {device} "
+        f"for {cfg.epochs} epochs"
+    )
+    for epoch in range(1, cfg.epochs + 1):
+        model.train()
+        pred = model(x, cam)
+        data_loss = torch.mean((pred - y) ** 2)
+        smooth_loss = _smoothness_loss(model, image_sizes, cfg, device)
+        loss = data_loss + cfg.smooth_weight * smooth_loss
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        history["train_loss"].append(float(loss.detach().cpu()))
+        if epoch == 1 or epoch % cfg.log_interval == 0 or epoch == cfg.epochs:
+            rmse_norm = math.sqrt(float(data_loss.detach().cpu()))
+            print(
+                f"[DenseInit] epoch {epoch:5d}/{cfg.epochs} "
+                f"loss={float(loss.detach().cpu()):.6e} rmse_norm={rmse_norm:.4f}"
+            )
+    return history
+
+
+def _smoothness_loss(
+    model: SfMDepthFiLMNet,
+    image_sizes: np.ndarray,
+    cfg: DepthInitConfig,
+    device: torch.device,
+) -> torch.Tensor:
+    if cfg.smooth_weight <= 0 or cfg.smooth_samples_per_camera <= 0:
+        return torch.zeros((), device=device)
+    n_cameras = image_sizes.shape[0]
+    xy = torch.rand(n_cameras * cfg.smooth_samples_per_camera, 2, device=device) * 2.0 - 1.0
+    xy.requires_grad_(True)
+    cam = torch.arange(n_cameras, device=device).repeat_interleave(cfg.smooth_samples_per_camera)
+    pred = model(xy, cam)
+    grad = torch.autograd.grad(pred.sum(), xy, create_graph=True)[0]
+    return torch.mean(grad**2)
+
+
+def _predict_inside_hulls(
+    model: SfMDepthFiLMNet,
+    observations: Dict[str, np.ndarray],
+    image_sizes: np.ndarray,
+    depth_mean: float,
+    depth_std: float,
+    K: np.ndarray,
+    dist: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    cfg: DepthInitConfig,
+    device: torch.device,
+) -> List[Dict[str, np.ndarray]]:
+    import cv2
+
+    products = []
+    for cam_id, (width, height) in enumerate(image_sizes):
+        uv = observations["uv"][observations["cam_indices"] == cam_id].astype(np.float64)
+        if len(uv) < 3:
+            raise ValueError(f"Camera {cam_id} has fewer than 3 SfM observations.")
+
+        hull = cv2.convexHull(uv.astype(np.float32)).reshape(-1, 2)
+        mask = np.zeros((int(height), int(width)), dtype=np.uint8)
+        cv2.fillPoly(mask, [np.round(hull).astype(np.int32)], 1)
+        rows, cols = np.nonzero(mask)
+        pixels = np.stack([cols, rows], axis=1).astype(np.float64)
+
+        xy_norm = _normalise_pixels(
+            pixels,
+            np.full(len(pixels), cam_id, dtype=np.int64),
+            image_sizes,
+        )
+        pred_depth = _predict_depth_batches(
+            model,
+            xy_norm,
+            np.full(len(pixels), cam_id, dtype=np.int64),
+            depth_mean,
+            depth_std,
+            cfg.prediction_batch_size,
+            device,
+        )
+        world = _backproject_pixels(pixels, pred_depth, K[cam_id], dist[cam_id], R[cam_id], t[cam_id])
+        interp_depth = _interpolate_sparse_depth(pixels, uv, observations["depth"][observations["cam_indices"] == cam_id])
+
+        products.append(
+            {
+                "cam_id": np.asarray(cam_id),
+                "hull": hull,
+                "mask": mask.astype(bool),
+                "pixels": pixels.astype(np.float32),
+                "pred_depth": pred_depth.astype(np.float32),
+                "interp_depth": interp_depth.astype(np.float32),
+                "world": world.astype(np.float32),
+            }
+        )
+        print(f"[DenseInit] cam_{cam_id}: predicted {len(pixels)} convex-hull pixels")
+    return products
+
+
+def _predict_depth_batches(
+    model: SfMDepthFiLMNet,
+    xy_norm: np.ndarray,
+    cam_indices: np.ndarray,
+    depth_mean: float,
+    depth_std: float,
+    batch_size: int,
+    device: torch.device,
+) -> np.ndarray:
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for start in range(0, len(xy_norm), batch_size):
+            stop = min(start + batch_size, len(xy_norm))
+            x = torch.as_tensor(xy_norm[start:stop], dtype=torch.float32, device=device)
+            cam = torch.as_tensor(cam_indices[start:stop], dtype=torch.long, device=device)
+            pred = model(x, cam).detach().cpu().numpy()
+            out.append(pred * depth_std + depth_mean)
+    return np.concatenate(out, axis=0)
+
+
+def _backproject_pixels(
+    pixels: np.ndarray,
+    depth: np.ndarray,
+    K: np.ndarray,
+    dist: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+) -> np.ndarray:
+    import cv2
+
+    undist = cv2.undistortPoints(pixels.reshape(-1, 1, 2), K, dist).reshape(-1, 2)
+    cam = np.column_stack([undist[:, 0] * depth, undist[:, 1] * depth, depth])
+    return (R.T @ (cam - t.reshape(1, 3)).T).T
+
+
+def _interpolate_sparse_depth(pixels: np.ndarray, uv: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    from scipy.interpolate import griddata
+
+    interp = griddata(uv, depth, pixels, method="linear")
+    missing = ~np.isfinite(interp)
+    if missing.any():
+        interp[missing] = griddata(uv, depth, pixels[missing], method="nearest")
+    return interp
+
+
+def _evaluate_sparse_errors(
+    model: SfMDepthFiLMNet,
+    xy_norm: np.ndarray,
+    cam_indices: np.ndarray,
+    sparse_depth: np.ndarray,
+    depth_mean: float,
+    depth_std: float,
+    device: torch.device,
+) -> Dict[str, np.ndarray]:
+    pred = _predict_depth_batches(
+        model=model,
+        xy_norm=xy_norm,
+        cam_indices=cam_indices,
+        depth_mean=depth_mean,
+        depth_std=depth_std,
+        batch_size=262144,
+        device=device,
+    )
+    return {"pred_depth": pred, "error": pred - sparse_depth}
+
+
+def _save_meta(
+    output_dir: Path,
+    cfg: DepthInitConfig,
+    cam_names: List[str],
+    image_sizes: np.ndarray,
+    history: Dict[str, List[float]],
+    depth_mean: float,
+    depth_std: float,
+    diagnostics: Dict[str, np.ndarray],
+) -> None:
+    error = diagnostics["error"]
+    meta = {
+        "purpose": "SfM-guided camera-conditioned neural depth initialisation",
+        "coordinate_convention": "depth is camera-coordinate Z in x_cam = R @ x_world + t",
+        "config": asdict(cfg),
+        "cam_names": cam_names,
+        "image_sizes_wh": image_sizes.tolist(),
+        "depth_mean": depth_mean,
+        "depth_std": depth_std,
+        "final_loss": history["train_loss"][-1] if history["train_loss"] else None,
+        "sparse_error_mean": float(error.mean()),
+        "sparse_error_std": float(error.std()),
+        "sparse_error_rmse": float(np.sqrt(np.mean(error**2))),
+    }
+    with open(output_dir / "model_init_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+
+def _save_dense_products(
+    output_dir: Path,
+    cam_names: List[str],
+    hull_products: List[Dict[str, np.ndarray]],
+) -> None:
+    dense_dir = output_dir / "per_camera_dense"
+    dense_dir.mkdir(parents=True, exist_ok=True)
+    index = []
+    for cam_name, item in zip(cam_names, hull_products):
+        path = dense_dir / f"{cam_name}_dense_init.npz"
+        np.savez_compressed(
+            path,
+            hull=item["hull"],
+            mask=item["mask"],
+            pixels=item["pixels"],
+            pred_depth=item["pred_depth"],
+            sfm_interp_depth=item["interp_depth"],
+            world=item["world"],
+        )
+        index.append(
+            {
+                "cam_name": cam_name,
+                "path": str(path),
+                "n_pixels": int(len(item["pixels"])),
+            }
+        )
+    with open(output_dir / "per_camera_dense_index.json", "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
+
+def _save_visualisations(
+    output_dir: Path,
+    cam_names: List[str],
+    sparse_points: np.ndarray,
+    hull_products: List[Dict[str, np.ndarray]],
+    observations: Dict[str, np.ndarray],
+    sparse_errors: np.ndarray,
+    cfg: DepthInitConfig,
+) -> Dict[str, Path]:
+    import matplotlib.pyplot as plt
+
+    paths = {
+        "dense_vs_sparse": output_dir / "01_dense_init_vs_sfm_sparse.png",
+        "predicted_depth": output_dir / "02_predicted_depth_maps.png",
+        "sfm_interpolated_depth": output_dir / "03_sfm_interpolated_depth_maps.png",
+        "sparse_error_hist": output_dir / "04_sparse_depth_error_histograms.png",
+    }
+    _plot_dense_vs_sparse(paths["dense_vs_sparse"], sparse_points, hull_products, cfg)
+    _plot_depth_grid(paths["predicted_depth"], cam_names, hull_products, "pred_depth", "Predicted Z-depth")
+    _plot_depth_grid(
+        paths["sfm_interpolated_depth"],
+        cam_names,
+        hull_products,
+        "interp_depth",
+        "SfM observed depth interpolation",
+    )
+    _plot_error_hist(paths["sparse_error_hist"], cam_names, observations, sparse_errors)
+    plt.close("all")
+    return paths
+
+
+def _plot_dense_vs_sparse(
+    path: Path,
+    sparse_points: np.ndarray,
+    hull_products: List[Dict[str, np.ndarray]],
+    cfg: DepthInitConfig,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    dense_chunks = []
+    stride = max(1, int(cfg.point_plot_stride))
+    for item in hull_products:
+        dense_chunks.append(item["world"][::stride])
+    dense = np.concatenate(dense_chunks, axis=0)
+
+    fig = plt.figure(figsize=(12, 5), dpi=180)
+    ax1 = fig.add_subplot(1, 2, 1, projection="3d")
+    ax2 = fig.add_subplot(1, 2, 2, projection="3d")
+    ax1.scatter(sparse_points[:, 0], sparse_points[:, 1], sparse_points[:, 2], s=1.5, c=sparse_points[:, 2], cmap="viridis")
+    ax1.set_title("SfM sparse reconstruction")
+    ax2.scatter(dense[:, 0], dense[:, 1], dense[:, 2], s=0.2, c=dense[:, 2], cmap="viridis")
+    ax2.set_title(f"Neural dense init (1/{stride} plotted)")
+    for ax in (ax1, ax2):
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        _set_axes_equal(ax)
+    fig.tight_layout()
+    fig.savefig(path)
+
+
+def _plot_depth_grid(
+    path: Path,
+    cam_names: List[str],
+    hull_products: List[Dict[str, np.ndarray]],
+    key: str,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    values = np.concatenate([item[key] for item in hull_products])
+    vmin, vmax = np.nanpercentile(values, [1, 99])
+    fig, axes = plt.subplots(3, 4, figsize=(16, 10), dpi=180, constrained_layout=True)
+    fig.suptitle(title)
+    last_im = None
+    for ax, cam_name, item in zip(axes.ravel(), cam_names, hull_products):
+        image = np.full(item["mask"].shape, np.nan, dtype=np.float32)
+        pixels = item["pixels"].astype(np.int64)
+        image[pixels[:, 1], pixels[:, 0]] = item[key]
+        last_im = ax.imshow(image, cmap="turbo", vmin=vmin, vmax=vmax)
+        ax.plot(item["hull"][:, 0], item["hull"][:, 1], "w-", linewidth=0.6)
+        ax.plot([item["hull"][-1, 0], item["hull"][0, 0]], [item["hull"][-1, 1], item["hull"][0, 1]], "w-", linewidth=0.6)
+        ax.set_title(cam_name)
+        ax.set_axis_off()
+    if last_im is not None:
+        fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.75, label="Z-depth")
+    fig.savefig(path)
+
+
+def _plot_error_hist(
+    path: Path,
+    cam_names: List[str],
+    observations: Dict[str, np.ndarray],
+    sparse_errors: np.ndarray,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(3, 4, figsize=(16, 10), dpi=180, constrained_layout=True)
+    fig.suptitle("Sparse observation depth residuals: predicted - SfM")
+    for ax, cam_name, cam_id in zip(axes.ravel(), cam_names, range(len(cam_names))):
+        err = sparse_errors[observations["cam_indices"] == cam_id]
+        if len(err) == 0:
+            ax.set_axis_off()
+            continue
+        weights = np.ones_like(err) / len(err)
+        ax.hist(err, bins=40, weights=weights, color="#4c78a8", edgecolor="white", linewidth=0.3)
+        ax.axvline(0.0, color="black", linewidth=0.8)
+        ax.set_title(f"{cam_name}  RMSE={np.sqrt(np.mean(err**2)):.4g}")
+        ax.set_xlabel("Depth error")
+        ax.set_ylabel("Ratio")
+    fig.savefig(path)
+
+
+def _set_axes_equal(ax) -> None:
+    limits = np.array([ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()])
+    spans = np.abs(limits[:, 1] - limits[:, 0])
+    centres = np.mean(limits, axis=1)
+    radius = 0.5 * max(spans)
+    ax.set_xlim3d([centres[0] - radius, centres[0] + radius])
+    ax.set_ylim3d([centres[1] - radius, centres[1] + radius])
+    ax.set_zlim3d([centres[2] - radius, centres[2] + radius])
