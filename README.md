@@ -99,7 +99,9 @@ Path convention:
 
 ## Pipeline
 
-![Config-driven pipeline](docs/pipeline_config_flow.png)
+![NDeF-DIC method overview](docs/method_overview.png)
+
+Method overview: (a) experimental multi-camera scene, (b) world-scale correction from the chessboard, (c) full project pipeline, (d) surface dense-reconstruction network, and (e) surface neural deformation-field network.
 
 Execution order:
 
@@ -121,8 +123,6 @@ result/deformation/02/
 ```
 
 ## Network Architecture
-
-![Neural deformation field](docs/network_deformation_field.png)
 
 The deformation model maps reference surface coordinates to 3D displacement:
 
