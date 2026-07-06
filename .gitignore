@@ -219,6 +219,7 @@ __marimo__/
 
 CLAUDE.md
 .claude/
+.agents/
 
 case/**/*.png
 case/**/*.html
