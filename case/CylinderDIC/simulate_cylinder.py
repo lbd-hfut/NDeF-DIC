@@ -22,9 +22,11 @@ Output layout (compatible with MultiCamDataset):
   │   ├── cameras.mat          # COLMAP-format camera parameters
   │   └── points3D.mat         # Sparse 3D surface points
   └── ground_truth/
-      ├── points_ref.npy       # (N, 3) reference surface points
-      ├── points_def.npy       # (N, 3) deformed surface points
-      ├── displacement.npy     # (N, 3) ground truth displacement
+      ├── camera_intrinsics.npy               # (C, 3, 3) theoretical K
+      ├── camera_rotations.npy                # (C, 3, 3) theoretical world-to-camera R
+      ├── camera_translations.npy             # (C, 3) theoretical world-to-camera t
+      ├── theoretical_surface_points.npy      # (N, 3) reference morphology points
+      ├── theoretical_deformation_field_*.npy # (N, 3) deformation field per step
       └── meta.json            # Simulation parameters
 """
 
@@ -36,7 +38,7 @@ import numpy as np
 from scipy.io import savemat
 from scipy.ndimage import gaussian_filter
 import imageio.v3 as iio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Tuple, List
 
 
@@ -69,6 +71,7 @@ class CylinderSimConfig:
     # ---- Speckle pattern ----
     speckle_image: str = ""             # Path to speckle image; empty = procedural 3D grains
     num_surface_points: int = 15_000_000
+    ground_truth_num_points: int = 100_000
     surface_coverage_angle: float = 360.0  # Degrees of circumference covered
     speckle_physical_size: float = 0.0      # mm — (texture mode only) set 0 = no tiling, >0 = tile
     num_speckle_grains: int = 80_000        # Number of Gaussian grains on surface (3D procedural mode)
@@ -607,6 +610,135 @@ def _compute_cylinder_normals(points: np.ndarray) -> np.ndarray:
 # Output
 # =========================================================================
 
+def save_ground_truth_outputs(
+    config: CylinderSimConfig,
+    K_list: List[np.ndarray],
+    R_list: List[np.ndarray],
+    t_list: List[np.ndarray],
+    dist_list: List[np.ndarray],
+    cam_centers: np.ndarray,
+    points_ref: np.ndarray,
+    points_def_list: List[np.ndarray],
+):
+    """Save theoretical camera parameters, surface morphology, and deformation fields."""
+    gt_dir = os.path.join(config.output_dir, "ground_truth")
+    os.makedirs(gt_dir, exist_ok=True)
+
+    N_cam = len(K_list)
+    K_arr = np.stack(K_list, axis=0).astype(np.float64)
+    R_arr = np.stack(R_list, axis=0).astype(np.float64)
+    t_arr = np.stack([t.reshape(3) for t in t_list], axis=0).astype(np.float64)
+    dist_arr = np.stack(dist_list, axis=0).astype(np.float64)
+    cam_centers_arr = cam_centers.astype(np.float64)
+    cam_names = np.array([f"cam_{i}" for i in range(N_cam)])
+
+    n_available = len(points_ref)
+    n_save = config.ground_truth_num_points
+    if n_save <= 0 or n_save >= n_available:
+        gt_indices = np.arange(n_available, dtype=np.int64)
+    else:
+        gt_indices = np.linspace(0, n_available - 1, n_save, dtype=np.int64)
+
+    points_ref_gt = points_ref[gt_indices]
+
+    # Theoretical camera intrinsics/extrinsics.
+    np.save(os.path.join(gt_dir, "camera_intrinsics.npy"), K_arr)
+    np.save(os.path.join(gt_dir, "camera_rotations.npy"), R_arr)
+    np.save(os.path.join(gt_dir, "camera_translations.npy"), t_arr)
+    np.save(os.path.join(gt_dir, "camera_centers.npy"), cam_centers_arr)
+    np.save(os.path.join(gt_dir, "camera_distortion.npy"), dist_arr)
+    np.savez_compressed(
+        os.path.join(gt_dir, "theoretical_camera_parameters.npz"),
+        K=K_arr,
+        R=R_arr,
+        t=t_arr,
+        camera_centers=cam_centers_arr,
+        distortion=dist_arr,
+        cam_names=cam_names,
+        image_width=config.image_width,
+        image_height=config.image_height,
+        coordinate_convention="world_to_camera: X_cam = R @ X_world + t",
+    )
+
+    # Theoretical reference morphology/surface points.
+    points_ref_f32 = points_ref_gt.astype(np.float32)
+    np.save(os.path.join(gt_dir, "ground_truth_sample_indices.npy"), gt_indices)
+    np.save(os.path.join(gt_dir, "theoretical_surface_points.npy"), points_ref_f32)
+    np.savez_compressed(
+        os.path.join(gt_dir, "theoretical_surface_points.npz"),
+        points=points_ref_f32,
+        surface_type=config.surface_type,
+        cylinder_radius=config.cylinder_radius,
+        cylinder_height=config.cylinder_height,
+        units="mm",
+    )
+
+    # Backward-compatible name used by existing scripts.
+    np.save(os.path.join(gt_dir, "points_ref.npy"), points_ref_f32)
+
+    for step_idx, pts_def in enumerate(points_def_list):
+        step = step_idx + 1
+        pts_def_gt = pts_def[gt_indices]
+        pts_def_f32 = pts_def_gt.astype(np.float32)
+        disp_f32 = (pts_def_gt - points_ref_gt).astype(np.float32)
+
+        # Theoretical deformed morphology and deformation field per step.
+        np.save(os.path.join(gt_dir, f"theoretical_deformed_surface_points_step{step:03d}.npy"),
+                pts_def_f32)
+        np.save(os.path.join(gt_dir, f"theoretical_deformation_field_step{step:03d}.npy"),
+                disp_f32)
+        np.savez_compressed(
+            os.path.join(gt_dir, f"theoretical_deformation_step{step:03d}.npz"),
+            points_ref=points_ref_f32,
+            points_def=pts_def_f32,
+            displacement=disp_f32,
+            deformation_type=config.deformation_type,
+            deformation_magnitude=config.deformation_magnitude,
+            step=step,
+            num_deformed_steps=config.num_deformed_steps,
+            units="mm",
+        )
+
+        # Backward-compatible names used by existing scripts.
+        np.save(os.path.join(gt_dir, f"points_def_step{step_idx + 1}.npy"),
+                pts_def_f32)
+        np.save(os.path.join(gt_dir, f"displacement_step{step_idx + 1}.npy"),
+                disp_f32)
+
+    # Meta
+    meta = {
+        "cylinder_radius": config.cylinder_radius,
+        "cylinder_height": config.cylinder_height,
+        "num_cameras": config.num_cameras,
+        "working_distance": config.working_distance,
+        "deformation_type": config.deformation_type,
+        "deformation_magnitude": config.deformation_magnitude,
+        "speckle_physical_size": config.speckle_physical_size,
+        "num_surface_points": config.num_surface_points,
+        "ground_truth_num_points_requested": config.ground_truth_num_points,
+        "ground_truth_num_points_saved": int(len(gt_indices)),
+        "num_deformed_steps": config.num_deformed_steps,
+        "ground_truth_files": {
+            "camera_intrinsics": "camera_intrinsics.npy",
+            "camera_rotations": "camera_rotations.npy",
+            "camera_translations": "camera_translations.npy",
+            "camera_centers": "camera_centers.npy",
+            "camera_distortion": "camera_distortion.npy",
+            "camera_parameters_bundle": "theoretical_camera_parameters.npz",
+            "sample_indices": "ground_truth_sample_indices.npy",
+            "surface_points": "theoretical_surface_points.npy",
+            "surface_points_bundle": "theoretical_surface_points.npz",
+            "deformed_surface_pattern": "theoretical_deformed_surface_points_step{step:03d}.npy",
+            "deformation_field_pattern": "theoretical_deformation_field_step{step:03d}.npy",
+            "deformation_bundle_pattern": "theoretical_deformation_step{step:03d}.npz",
+        },
+    }
+    with open(os.path.join(gt_dir, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"  Ground truth saved to {gt_dir}/")
+
+
 def save_outputs(
     config: CylinderSimConfig,
     images_ref: List[np.ndarray],
@@ -615,6 +747,7 @@ def save_outputs(
     R_list: List[np.ndarray],
     t_list: List[np.ndarray],
     dist_list: List[np.ndarray],
+    cam_centers: np.ndarray,
     points_ref: np.ndarray,
     points_def_list: List[np.ndarray],
 ):
@@ -666,34 +799,11 @@ def save_outputs(
     print(f"  Calibration saved to {calib_dir}/")
 
     # ---- Ground truth ----
-    gt_dir = os.path.join(out, "ground_truth")
-    os.makedirs(gt_dir, exist_ok=True)
-
-    np.save(os.path.join(gt_dir, "points_ref.npy"), points_ref.astype(np.float32))
-
-    for step_idx, pts_def in enumerate(points_def_list):
-        np.save(os.path.join(gt_dir, f"points_def_step{step_idx + 1}.npy"),
-                pts_def.astype(np.float32))
-        disp = pts_def - points_ref
-        np.save(os.path.join(gt_dir, f"displacement_step{step_idx + 1}.npy"),
-                disp.astype(np.float32))
-
-    # Meta
-    meta = {
-        "cylinder_radius": config.cylinder_radius,
-        "cylinder_height": config.cylinder_height,
-        "num_cameras": config.num_cameras,
-        "working_distance": config.working_distance,
-        "deformation_type": config.deformation_type,
-        "deformation_magnitude": config.deformation_magnitude,
-        "speckle_physical_size": config.speckle_physical_size,
-        "num_surface_points": config.num_surface_points,
-        "num_deformed_steps": config.num_deformed_steps,
-    }
-    with open(os.path.join(gt_dir, "meta.json"), "w") as f:
-        json.dump(meta, f, indent=2)
-
-    print(f"  Ground truth saved to {gt_dir}/")
+    save_ground_truth_outputs(
+        config,
+        K_list, R_list, t_list, dist_list, cam_centers,
+        points_ref, points_def_list,
+    )
 
 
 # =========================================================================
@@ -713,6 +823,8 @@ def main():
     parser.add_argument("--image_width", type=int, default=1440)
     parser.add_argument("--image_height", type=int, default=1080)
     parser.add_argument("--num_points", type=int, default=15_000_000)
+    parser.add_argument("--ground_truth_points", type=int, default=100_000,
+                        help="Number of theoretical surface/deformation points saved to ground_truth.")
     parser.add_argument("--deformation", type=str, default="expansion",
                         choices=["none", "expansion", "torsion", "compression", "combined"])
     parser.add_argument("--deformation_magnitude", type=float, default=0.5)
@@ -731,6 +843,8 @@ def main():
     parser.add_argument("--k2", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_deformed_steps", type=int, default=1)
+    parser.add_argument("--ground_truth_only", action="store_true",
+                        help="Only save theoretical ground truth; do not render or overwrite images.")
 
     args = parser.parse_args()
 
@@ -744,6 +858,7 @@ def main():
         image_width=args.image_width,
         image_height=args.image_height,
         num_surface_points=args.num_points,
+        ground_truth_num_points=args.ground_truth_points,
         deformation_type=args.deformation,
         deformation_magnitude=args.deformation_magnitude,
         speckle_image=args.speckle_image,
@@ -778,7 +893,8 @@ def main():
     print(f"  Working dist:   {config.working_distance} mm")
     print(f"  Cylinder:       R={config.cylinder_radius}, H={config.cylinder_height} mm")
     print(f"  Image:          {config.image_width}×{config.image_height}")
-    print(f"  Surface points: {config.num_surface_points:,}")
+    print(f"  Render points:  {config.num_surface_points:,}")
+    print(f"  GT save points: {config.ground_truth_num_points:,}")
     print(f"  Deformation:    {config.deformation_type} ({config.deformation_magnitude})")
     print(f"  Output:         {config.output_dir}")
     print()
@@ -797,10 +913,26 @@ def main():
         print(f"  Camera {i}: center=({cam_centers[i,0]:.1f}, {cam_centers[i,1]:.1f}, "
               f"{cam_centers[i,2]:.1f}) mm, f={K_list[i][0,0]:.1f} px")
 
+    surface_config = config
+    if args.ground_truth_only:
+        surface_config = replace(config, num_surface_points=config.ground_truth_num_points)
+
     # ---- Generate surface ----
-    print(f"\n[2/5] Generating {config.num_surface_points:,} surface points...")
-    points_ref, intensities, normals_ref, grains = generate_cylinder_surface(config, rng)
+    print(f"\n[2/5] Generating {surface_config.num_surface_points:,} surface points...")
+    points_ref, intensities, normals_ref, grains = generate_cylinder_surface(surface_config, rng)
     print(f"  Generated {len(points_ref):,} points on cylinder surface")
+
+    if args.ground_truth_only:
+        print(f"\n[3/3] Applying deformation and saving ground truth only...")
+        points_def_list = apply_deformation(points_ref, config)
+        save_ground_truth_outputs(
+            config,
+            K_list, R_list, t_list, dist_list, cam_centers,
+            points_ref, points_def_list,
+        )
+        print("\nDone. Ground truth output:")
+        print(f"  {os.path.join(config.output_dir, 'ground_truth')}/")
+        return
 
     # ---- Render reference images ----
     print(f"\n[3/5] Rendering reference images ({config.num_cameras} cameras)...")
@@ -832,6 +964,7 @@ def main():
         config,
         images_ref, images_def_list,
         K_list, R_list, t_list, dist_list,
+        cam_centers,
         points_ref, points_def_list,
     )
 
