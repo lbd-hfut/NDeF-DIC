@@ -4,7 +4,7 @@
     "cylinder_radius": 80.0,
     "cylinder_height": 120.0,
     "surface_type": "sinusoidal_cylinder",
-    "sinusoidal_amplitude": 5.0,
+    "sinusoidal_amplitude": 2.0,
     "sinusoidal_frequency": 3.0,
     "num_cameras": 12,
     "working_distance": 400.0,
@@ -29,7 +29,7 @@
     ],
     "gamma": 0.55,
     "deformation_type": "sinusoidal_radial",
-    "deformation_magnitude": 1.0,
+    "deformation_magnitude": 0.5,
     "num_deformed_steps": 1,
     "seed": 42
   },

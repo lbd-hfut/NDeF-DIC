@@ -57,7 +57,7 @@ class CylinderSimConfig:
     cylinder_radius: float = 80.0       # mm
     cylinder_height: float = 120.0      # mm
     surface_type: str = "sinusoidal_cylinder"  # "cylinder" | "sinusoidal_cylinder"
-    sinusoidal_amplitude: float = 5.0   # mm, radial geometry amplitude
+    sinusoidal_amplitude: float = 2.0   # mm, radial geometry amplitude
     sinusoidal_frequency: float = 3.0
 
     # ---- Camera array ----
@@ -87,7 +87,7 @@ class CylinderSimConfig:
 
     # ---- Deformation ----
     deformation_type: str = "sinusoidal_radial"  # "sinusoidal_radial" | "none" | "expansion" | "torsion" | "compression" | "combined"
-    deformation_magnitude: float = 1.0  # sinusoidal_radial/expansion: mm; torsion: degrees; compression: % strain
+    deformation_magnitude: float = 0.5  # sinusoidal_radial/expansion: mm; torsion: degrees; compression: % strain
     num_deformed_steps: int = 1
 
     # ---- Random seed ----
@@ -960,7 +960,7 @@ def main():
     parser.add_argument("--cylinder_height", type=float, default=120.0)
     parser.add_argument("--surface_type", type=str, default="sinusoidal_cylinder",
                         choices=["cylinder", "sinusoidal_cylinder"])
-    parser.add_argument("--sinusoidal_amplitude", type=float, default=5.0,
+    parser.add_argument("--sinusoidal_amplitude", type=float, default=2.0,
                         help="Radial surface perturbation amplitude in mm.")
     parser.add_argument("--sinusoidal_frequency", type=float, default=3.0,
                         help="Product-sine frequency on normalized unwrapped coordinates.")
@@ -972,7 +972,7 @@ def main():
                         help="Number of theoretical surface/deformation points saved to ground_truth.")
     parser.add_argument("--deformation", type=str, default="sinusoidal_radial",
                         choices=["none", "sinusoidal_radial", "expansion", "torsion", "compression", "combined"])
-    parser.add_argument("--deformation_magnitude", type=float, default=1.0)
+    parser.add_argument("--deformation_magnitude", type=float, default=0.5)
     parser.add_argument("--speckle_image", type=str, default="",
                         help="Path to speckle pattern image; auto-generate if empty")
     parser.add_argument("--speckle_physical_size", type=float, default=0.0,

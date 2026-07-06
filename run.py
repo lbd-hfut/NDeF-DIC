@@ -232,6 +232,7 @@ def run_dense(config: Mapping[str, Any]) -> dict[str, str]:
                     roi_dir=roi_dir,
                     use_external_roi=not auto_roi_enabled,
                     external_roi_dir=None if auto_roi_enabled else roi_dir,
+                    epochs=int(_cfg(config, "dense.model_init.epochs", 3000)),
                 )
             ).items()
         }
@@ -263,6 +264,7 @@ def run_dense(config: Mapping[str, Any]) -> dict[str, str]:
                     model_init_dir=model_init_dir,
                     dataset_dir=dataset_dir,
                     output_dir=znssd_dir,
+                    epochs=int(_cfg(config, "dense.znssd_opt.epochs", 100)),
                     max_steps_per_epoch=None,
                 )
             ).items()

@@ -14,10 +14,10 @@
 
 project:
   # Human-readable case name used in logs and output summaries.
-  name: CylinderDIC
+  name: ComplexCylinderDIC
 
   # Root directory of this experimental case.
-  data_dir: case/CylinderDIC
+  data_dir: case/ComplexCylinderDIC
 
   # Root output directory relative to project.data_dir.
   # Module result paths in other config files are relative to this folder

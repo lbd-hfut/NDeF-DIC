@@ -90,7 +90,7 @@ deformation:
 
   training:
     # Current best CylinderDIC setting after learning-rate sweep.
-    epochs: 150
+    epochs: 1000
     lr: 0.003
 
     # Options:
