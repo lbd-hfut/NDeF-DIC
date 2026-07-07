@@ -27,6 +27,11 @@ dense:
     # Camera depth network used to initialize camera-coordinate Z depth.
     model: SfMDepthFiLMNet
 
+    positional_encoding:
+      # Pure Fourier pixel encoding: [u,v] -> [sin,cos,...] -> hidden_dim.
+      enabled: true
+      num_frequencies: 4
+
     sparse_filter:
       # Clean obvious SfM outliers before sparse-depth initialization.
       enabled: true

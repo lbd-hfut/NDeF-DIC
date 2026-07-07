@@ -33,6 +33,8 @@ class DepthInitConfig:
     camera_layers: int = 2
     trunk_layers: int = 3
     camera_embedding_dim: int = 16
+    positional_encoding_enabled: bool = False
+    positional_encoding_num_frequencies: int = 4
     epochs: int = 3000
     lr: float = 1e-3
     weight_decay: float = 1e-6
@@ -72,6 +74,23 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+class FourierPixelEncoding(nn.Module):
+    """Pure Fourier encoding for normalized pixel coordinates."""
+
+    def __init__(self, num_frequencies: int):
+        super().__init__()
+        if num_frequencies < 1:
+            raise ValueError("num_frequencies must be >= 1")
+        frequencies = 2.0 ** torch.arange(num_frequencies, dtype=torch.float32)
+        self.register_buffer("frequencies", frequencies)
+        self.output_dim = 4 * num_frequencies
+
+    def forward(self, pixel_xy_norm: torch.Tensor) -> torch.Tensor:
+        angles = math.pi * pixel_xy_norm[..., None, :] * self.frequencies[:, None]
+        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        return encoded.flatten(start_dim=-2)
+
+
 class SfMDepthFiLMNet(nn.Module):
     """Camera-conditioned sparse-depth interpolator.
 
@@ -88,15 +107,23 @@ class SfMDepthFiLMNet(nn.Module):
         pixel_layers: int = 3,
         camera_layers: int = 2,
         trunk_layers: int = 3,
+        positional_encoding_enabled: bool = False,
+        positional_encoding_num_frequencies: int = 4,
     ):
         super().__init__()
-        self.pixel_head = MLP(2, hidden_dim, hidden_dim, pixel_layers)
+        self.pixel_encoding = (
+            FourierPixelEncoding(positional_encoding_num_frequencies)
+            if positional_encoding_enabled
+            else nn.Identity()
+        )
+        pixel_input_dim = self.pixel_encoding.output_dim if positional_encoding_enabled else 2
+        self.pixel_head = MLP(pixel_input_dim, hidden_dim, hidden_dim, pixel_layers)
         self.camera_embedding = nn.Embedding(n_cameras, camera_embedding_dim)
         self.camera_head = MLP(camera_embedding_dim, hidden_dim, hidden_dim * 2, camera_layers)
         self.depth_head = MLP(hidden_dim, hidden_dim, 1, trunk_layers)
 
     def forward(self, pixel_xy_norm: torch.Tensor, cam_indices: torch.Tensor) -> torch.Tensor:
-        pixel_features = self.pixel_head(pixel_xy_norm)
+        pixel_features = self.pixel_head(self.pixel_encoding(pixel_xy_norm))
         camera_features = self.camera_head(self.camera_embedding(cam_indices.long()))
         gamma, beta = camera_features.chunk(2, dim=-1)
         fused = (1.0 + 0.1 * gamma) * pixel_features + beta
@@ -140,6 +167,8 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         pixel_layers=cfg.pixel_layers,
         camera_layers=cfg.camera_layers,
         trunk_layers=cfg.trunk_layers,
+        positional_encoding_enabled=cfg.positional_encoding_enabled,
+        positional_encoding_num_frequencies=cfg.positional_encoding_num_frequencies,
     ).to(device)
 
     history = _train_model(

@@ -234,6 +234,12 @@ def run_dense(config: Mapping[str, Any]) -> dict[str, str]:
                     external_roi_dir=None if auto_roi_enabled else roi_dir,
                     epochs=int(_cfg(config, "dense.model_init.epochs", 3000)),
                     smooth_weight=float(_cfg(config, "dense.model_init.smooth_weight", 1e-4)),
+                    positional_encoding_enabled=bool(
+                        _cfg(config, "dense.model_init.positional_encoding.enabled", False)
+                    ),
+                    positional_encoding_num_frequencies=int(
+                        _cfg(config, "dense.model_init.positional_encoding.num_frequencies", 4)
+                    ),
                     sparse_filter_enabled=bool(_cfg(config, "dense.model_init.sparse_filter.enabled", True)),
                     sparse_filter_min_track_length=int(
                         _cfg(config, "dense.model_init.sparse_filter.min_track_length", 2)

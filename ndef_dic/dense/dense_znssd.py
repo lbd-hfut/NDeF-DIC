@@ -561,6 +561,8 @@ def load_depth_model(model_init_dir: Path, device: torch.device) -> Tuple[SfMDep
         pixel_layers=int(cfg["pixel_layers"]),
         camera_layers=int(cfg["camera_layers"]),
         trunk_layers=int(cfg["trunk_layers"]),
+        positional_encoding_enabled=bool(cfg.get("positional_encoding_enabled", False)),
+        positional_encoding_num_frequencies=int(cfg.get("positional_encoding_num_frequencies", 4)),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     return model, float(ckpt["depth_mean"]), float(ckpt["depth_std"])
