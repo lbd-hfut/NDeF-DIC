@@ -244,6 +244,7 @@ checkpoints/
 runs/
 outputs/
 results/
+temp/
 
 # Markdown notes/docs; keep README files tracked
 *.md

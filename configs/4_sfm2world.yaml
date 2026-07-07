@@ -44,7 +44,24 @@ sfm2world:
   #   max_baseline: choose the visible pair with largest SfM baseline. Often
   #                 better for triangulation stability, but may use more
   #                 oblique views.
-  pair_selection: middle
+  #   all_pairs: evaluate all visible camera pairs, reject geometrically
+  #              inconsistent pairs, and use the median scale of reliable pairs.
+  pair_selection: all_pairs
+
+  # Robust statistic used to estimate one chessboard square size from valid
+  # triangulated grid edges.
+  # Options: mean, median, trimmed_mean, p25.
+  scale_stat: trimmed_mean
+  trim_fraction: 0.20
+
+  # Pair-level geometry quality gates. A valid chessboard pair should have
+  # nearly constant adjacent edge lengths in SfM coordinates.
+  max_pair_edge_cv: 0.08
+  max_edge_cv_warning: 0.05
+
+  # Corner-order selection uses reprojection error plus this weight times
+  # edge-length coefficient of variation.
+  corner_order_edge_cv_weight: 1.0
 
   # Corner subpixel refinement window. Larger can help blurred images but may
   # drift if corners are close or strongly distorted.
