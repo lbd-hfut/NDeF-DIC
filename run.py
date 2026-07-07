@@ -233,6 +233,21 @@ def run_dense(config: Mapping[str, Any]) -> dict[str, str]:
                     use_external_roi=not auto_roi_enabled,
                     external_roi_dir=None if auto_roi_enabled else roi_dir,
                     epochs=int(_cfg(config, "dense.model_init.epochs", 3000)),
+                    smooth_weight=float(_cfg(config, "dense.model_init.smooth_weight", 1e-4)),
+                    sparse_filter_enabled=bool(_cfg(config, "dense.model_init.sparse_filter.enabled", True)),
+                    sparse_filter_min_track_length=int(
+                        _cfg(config, "dense.model_init.sparse_filter.min_track_length", 2)
+                    ),
+                    sparse_filter_max_reproj_error=_cfg(
+                        config, "dense.model_init.sparse_filter.max_reproj_error", None
+                    ),
+                    sparse_filter_radius_mad_thresh=float(
+                        _cfg(config, "dense.model_init.sparse_filter.radius_mad_thresh", 8.0)
+                    ),
+                    sparse_filter_knn_k=int(_cfg(config, "dense.model_init.sparse_filter.knn_k", 8)),
+                    sparse_filter_knn_mad_thresh=float(
+                        _cfg(config, "dense.model_init.sparse_filter.knn_mad_thresh", 8.0)
+                    ),
                 )
             ).items()
         }

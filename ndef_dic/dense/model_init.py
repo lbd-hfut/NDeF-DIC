@@ -44,6 +44,12 @@ class DepthInitConfig:
     roi_dir: str | None = None
     use_external_roi: bool = False
     external_roi_dir: str | None = None
+    sparse_filter_enabled: bool = True
+    sparse_filter_min_track_length: int = 2
+    sparse_filter_max_reproj_error: float | None = None
+    sparse_filter_radius_mad_thresh: float = 8.0
+    sparse_filter_knn_k: int = 8
+    sparse_filter_knn_mad_thresh: float = 8.0
     seed: int = 7
     device: str = "auto"
 
@@ -110,6 +116,7 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
     cameras = _load_npz(sfm_dir / "cameras.npz")
     sparse = _load_npz(sfm_dir / "sparse_points.npz")
     obs = _load_npz(sfm_dir / "observations.npz")
+    sparse, obs, sparse_filter_meta = _filter_sparse_products(sparse, obs, output_dir, cfg)
 
     cam_names = [str(x) for x in cameras["cam_names"]]
     K = cameras["K"].astype(np.float64)
@@ -199,7 +206,7 @@ def run_model_init(config: DepthInitConfig | None = None) -> Dict[str, str]:
         },
         output_dir / "depth_film_init.pt",
     )
-    _save_meta(output_dir, cfg, cam_names, image_sizes, history, depth_mean, depth_std, diagnostics)
+    _save_meta(output_dir, cfg, cam_names, image_sizes, history, depth_mean, depth_std, diagnostics, sparse_filter_meta)
 
     fig_paths = _save_visualisations(
         output_dir=output_dir,
@@ -218,6 +225,146 @@ def _load_npz(path: Path) -> Dict[str, np.ndarray]:
         raise FileNotFoundError(path)
     data = np.load(path, allow_pickle=True)
     return {key: data[key] for key in data.files}
+
+
+def _filter_sparse_products(
+    sparse: Dict[str, np.ndarray],
+    observations: Dict[str, np.ndarray],
+    output_dir: Path,
+    cfg: DepthInitConfig,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, object]]:
+    points = sparse["points3D"].astype(np.float64)
+    point_ids = sparse["point_ids"].astype(np.int64)
+    n_points = len(points)
+    keep = np.ones(n_points, dtype=bool)
+    reasons: Dict[str, int] = {}
+
+    if cfg.sparse_filter_enabled and n_points:
+        finite = np.isfinite(points).all(axis=1)
+        keep &= finite
+        reasons["nonfinite"] = int((~finite).sum())
+
+        if "track_lengths" in sparse and cfg.sparse_filter_min_track_length > 1:
+            track_ok = sparse["track_lengths"].astype(np.int64) >= int(cfg.sparse_filter_min_track_length)
+            keep &= track_ok
+            reasons["short_track"] = int((~track_ok).sum())
+
+        if cfg.sparse_filter_max_reproj_error is not None and "reproj_error" in sparse:
+            reproj_ok = sparse["reproj_error"].astype(np.float64) <= float(cfg.sparse_filter_max_reproj_error)
+            keep &= reproj_ok
+            reasons["high_reprojection_error"] = int((~reproj_ok).sum())
+
+        radius_keep = _robust_radius_mask(points, float(cfg.sparse_filter_radius_mad_thresh))
+        keep &= radius_keep
+        reasons["robust_radius"] = int((~radius_keep).sum())
+
+        knn_keep = _knn_density_mask(
+            points,
+            k=int(cfg.sparse_filter_knn_k),
+            mad_thresh=float(cfg.sparse_filter_knn_mad_thresh),
+        )
+        keep &= knn_keep
+        reasons["knn_density"] = int((~knn_keep).sum())
+
+    filtered_sparse, old_to_new = _apply_sparse_point_mask(sparse, keep)
+    filtered_obs = _apply_observation_point_mask(observations, old_to_new)
+    filter_dir = output_dir / "sparse_filter"
+    filter_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(filter_dir / "sparse_points_filtered.npz", **filtered_sparse)
+    np.savez_compressed(filter_dir / "observations_filtered.npz", **filtered_obs)
+
+    meta: Dict[str, object] = {
+        "enabled": bool(cfg.sparse_filter_enabled),
+        "n_points_before": int(n_points),
+        "n_points_after": int(len(filtered_sparse["points3D"])),
+        "n_points_removed": int(n_points - len(filtered_sparse["points3D"])),
+        "n_observations_before": int(len(observations["cam_indices"])),
+        "n_observations_after": int(len(filtered_obs["cam_indices"])),
+        "n_observations_removed": int(len(observations["cam_indices"]) - len(filtered_obs["cam_indices"])),
+        "criteria": {
+            "min_track_length": int(cfg.sparse_filter_min_track_length),
+            "max_reproj_error": cfg.sparse_filter_max_reproj_error,
+            "radius_mad_thresh": float(cfg.sparse_filter_radius_mad_thresh),
+            "knn_k": int(cfg.sparse_filter_knn_k),
+            "knn_mad_thresh": float(cfg.sparse_filter_knn_mad_thresh),
+        },
+        "raw_rejection_counts": reasons,
+        "filtered_sparse_points": str(filter_dir / "sparse_points_filtered.npz"),
+        "filtered_observations": str(filter_dir / "observations_filtered.npz"),
+    }
+    with open(filter_dir / "sparse_filter_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    if cfg.sparse_filter_enabled:
+        print(
+            f"[SparseFilter] kept {meta['n_points_after']}/{meta['n_points_before']} "
+            f"points and {meta['n_observations_after']}/{meta['n_observations_before']} observations"
+        )
+    else:
+        print("[SparseFilter] disabled; using raw SfM sparse points")
+    return filtered_sparse, filtered_obs, meta
+
+
+def _robust_radius_mask(points: np.ndarray, mad_thresh: float) -> np.ndarray:
+    if len(points) < 8 or mad_thresh <= 0:
+        return np.ones(len(points), dtype=bool)
+    centre = np.median(points, axis=0)
+    radius = np.linalg.norm(points - centre, axis=1)
+    median = float(np.median(radius))
+    mad = float(np.median(np.abs(radius - median)))
+    if mad <= 1e-12:
+        return np.ones(len(points), dtype=bool)
+    sigma = 1.4826 * mad
+    return radius <= median + mad_thresh * sigma
+
+
+def _knn_density_mask(points: np.ndarray, k: int, mad_thresh: float) -> np.ndarray:
+    if len(points) < max(8, k + 2) or k <= 0 or mad_thresh <= 0:
+        return np.ones(len(points), dtype=bool)
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return np.ones(len(points), dtype=bool)
+    tree = cKDTree(points)
+    distances, _ = tree.query(points, k=min(k + 1, len(points)))
+    kth = distances[:, -1]
+    median = float(np.median(kth))
+    mad = float(np.median(np.abs(kth - median)))
+    if mad <= 1e-12:
+        return np.ones(len(points), dtype=bool)
+    sigma = 1.4826 * mad
+    return kth <= median + mad_thresh * sigma
+
+
+def _apply_sparse_point_mask(
+    sparse: Dict[str, np.ndarray],
+    keep: np.ndarray,
+) -> Tuple[Dict[str, np.ndarray], Dict[int, int]]:
+    old_indices = np.flatnonzero(keep)
+    old_to_new = {int(old): int(new) for new, old in enumerate(old_indices)}
+    out: Dict[str, np.ndarray] = {}
+    for key, value in sparse.items():
+        if isinstance(value, np.ndarray) and len(value) == len(keep):
+            out[key] = value[keep]
+        else:
+            out[key] = value
+    return out, old_to_new
+
+
+def _apply_observation_point_mask(
+    observations: Dict[str, np.ndarray],
+    old_to_new: Dict[int, int],
+) -> Dict[str, np.ndarray]:
+    point_indices = observations["point_indices"].astype(np.int64)
+    keep_obs = np.fromiter((int(idx) in old_to_new for idx in point_indices), dtype=bool, count=len(point_indices))
+    out: Dict[str, np.ndarray] = {}
+    for key, value in observations.items():
+        if isinstance(value, np.ndarray) and value.shape[:1] == keep_obs.shape:
+            out[key] = value[keep_obs]
+        else:
+            out[key] = value
+    out["point_indices"] = np.asarray([old_to_new[int(idx)] for idx in point_indices[keep_obs]], dtype=np.int64)
+    return out
 
 
 def _select_device(requested: str) -> torch.device:
@@ -498,6 +645,7 @@ def _save_meta(
     depth_mean: float,
     depth_std: float,
     diagnostics: Dict[str, np.ndarray],
+    sparse_filter_meta: Dict[str, object],
 ) -> None:
     error = diagnostics["error"]
     meta = {
@@ -512,6 +660,7 @@ def _save_meta(
         "sparse_error_mean": float(error.mean()),
         "sparse_error_std": float(error.std()),
         "sparse_error_rmse": float(np.sqrt(np.mean(error**2))),
+        "sparse_filter": sparse_filter_meta,
     }
     with open(output_dir / "model_init_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

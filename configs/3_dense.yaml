@@ -27,8 +27,21 @@ dense:
     # Camera depth network used to initialize camera-coordinate Z depth.
     model: SfMDepthFiLMNet
 
+    sparse_filter:
+      # Clean obvious SfM outliers before sparse-depth initialization.
+      enabled: true
+      min_track_length: 2
+      max_reproj_error:
+      radius_mad_thresh: 8.0
+      knn_k: 8
+      knn_mad_thresh: 8.0
+
     # Number of training epochs for sparse SfM-guided depth initialization.
-    epochs: 5000
+    epochs: 10000
+
+    # Pixel-gradient smoothness weight for the initialized normalized depth field.
+    # Set to 0 to let sparse SfM depth observations drive local variations.
+    smooth_weight: 0.0
 
     # Depth is normalized as z_norm=(z-depth_mean)/depth_std.
     depth_normalization: mean_std
@@ -39,7 +52,7 @@ dense:
 
   znssd_opt:
     # Number of training epochs for multi-view ZNSSD depth refinement.
-    epochs: 500
+    epochs: 100
 
     # Patch radius for ZNSSD optimization.
     # radius=2 means 5x5 patches.

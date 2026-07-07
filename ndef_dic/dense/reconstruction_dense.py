@@ -46,7 +46,7 @@ def run_dense_reconstruction(config: DenseReconstructionConfig | None = None) ->
 
     device = select_device(cfg.device)
     cameras = load_npz(sfm_dir / "cameras.npz")
-    sparse = load_npz(sfm_dir / "sparse_points.npz")
+    sparse = _load_plot_sparse(sfm_dir, model_init_dir)
     cam_names = [str(x) for x in cameras["cam_names"]]
     image_sizes = torch.as_tensor(_load_image_sizes(cameras["image_paths"]), dtype=torch.float32, device=device)
     K = torch.as_tensor(cameras["K"], dtype=torch.float32, device=device)
@@ -122,6 +122,13 @@ def run_dense_reconstruction(config: DenseReconstructionConfig | None = None) ->
         "index": str(output_dir / "reconstruction_dense_index.json"),
         "meta": str(output_dir / "reconstruction_dense_meta.json"),
     }
+
+
+def _load_plot_sparse(sfm_dir: Path, model_init_dir: Path) -> Dict[str, np.ndarray]:
+    filtered = model_init_dir / "sparse_filter" / "sparse_points_filtered.npz"
+    if filtered.exists():
+        return load_npz(filtered)
+    return load_npz(sfm_dir / "sparse_points.npz")
 
 
 def _predict_camera_dense(
