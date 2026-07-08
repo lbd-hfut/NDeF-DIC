@@ -238,6 +238,7 @@ case/**/result/
 case/**/results/
 case/**/output/
 case/**/outputs/
+case/**/visualization/
 case/**/dense_workspace/
 case/**/colmap_workspace/
 checkpoints/
@@ -245,6 +246,7 @@ runs/
 outputs/
 results/
 temp/
+visualization/
 
 # Markdown notes/docs; keep README files tracked
 *.md
